@@ -1,0 +1,21 @@
+version: '3'
+services:
+  chirpstack-application-server:
+    networks:
+      - traefik
+      - default
+    labels:
+      - traefik.enable=true
+      - traefik.port=8080
+      - traefik.docker.network=traefik
+      - traefik.http.routers.chirpstack-application-server-http.rule=Host(`${CHIRPSTACK_DOMAIN:?chirpstack-domain}`)
+      - traefik.http.routers.chirpstack-application-server-http.entrypoints=http
+      - traefik.http.middlewares.https-redirect.redirectscheme.scheme=https
+      - traefik.http.routers.chirpstack-application-server-http.middlewares=https-redirect
+      - traefik.http.routers.chirpstack-application-server-https.rule=Host(`${CHIRPSTACK_DOMAIN:?chirpstack-domain}`)
+      - traefik.http.routers.chirpstack-application-server-https.entrypoints=https
+      - traefik.http.routers.chirpstack-application-server-https.tls.certresolver=letsencrypt
+
+networks:
+  traefik:
+    external: true

@@ -1,0 +1,76 @@
+version: '3'
+
+x-logging:
+  &default-logging
+  driver: 'json-file'
+  options:
+    max-size: "100m"
+    max-file: "1"
+
+services:
+  chirpstack-network-server:
+    image: chirpstack/chirpstack-network-server:3
+    volumes:
+      - ./docker-data/chirpstack-network-server:/etc/chirpstack-network-server
+    restart: unless-stopped
+    depends_on:
+      - postgresql
+      - mosquitto
+    logging: *default-logging
+
+  chirpstack-application-server:
+    image: chirpstack/chirpstack-application-server:3
+    ports:
+      - 8080:8080
+    volumes:
+      - ./docker-data/chirpstack-application-server:/etc/chirpstack-application-server
+    restart: unless-stopped
+    depends_on:
+      - chirpstack-network-server
+    logging: *default-logging
+
+  chirpstack-gateway-bridge:
+    image: chirpstack/chirpstack-gateway-bridge:3
+    ports:
+      - 1700:1700/udp
+    volumes:
+      - ./docker-data/chirpstack-gateway-bridge:/etc/chirpstack-gateway-bridge
+    restart: unless-stopped
+    depends_on:
+      - mosquitto
+    logging: *default-logging
+
+  postgresql:
+    image: postgres:10.20-alpine
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=root
+    volumes:
+      - ./docker-data/postgresql/initdb:/docker-entrypoint-initdb.d
+      - postgresqldata:/var/lib/postgresql/data
+    restart: unless-stopped
+    logging: *default-logging
+
+  redis:
+    image: redis:6-alpine
+    volumes:
+      - redisdata:/data
+    restart: unless-stopped
+    logging: *default-logging
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - 1883:1883
+    volumes:
+      - ./docker-data/eclipse-mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+    restart: unless-stopped
+    logging: *default-logging
+
+volumes:
+  postgresqldata:
+  redisdata:
+
+networks:
+  default:
+    name: chirpstack

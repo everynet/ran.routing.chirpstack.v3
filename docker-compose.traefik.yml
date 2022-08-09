@@ -1,0 +1,41 @@
+version: '3'
+services:
+  traefik:
+    image: traefik:v2.8
+    restart: unless-stopped
+    container_name: traefik
+    command: >-
+      --global.sendAnonymousUsage=false
+      --global.checkNewVersion=false
+      --log=true
+      --log.level=INFO
+      --accesslog=true
+      --accesslog.filepath=/dev/stdout
+      --entrypoints.http.address=:80
+      --entrypoints.https.address=:443
+      --providers.docker
+      --providers.docker.exposedByDefault=false
+      --certificatesresolvers.letsencrypt.acme.email=${TRAEFIK_ACME_EMAIL}
+      --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      --certificatesresolvers.letsencrypt.acme.httpchallenge=true
+      --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=http
+    ports:
+      - 80:80
+      - 443:443
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik_acme_data:/letsencrypt
+    logging:
+      driver: 'json-file'
+      options:
+        max-size: "100m"
+        max-file: "1"
+    networks:
+      - traefik
+
+volumes:
+  traefik_acme_data:
+
+networks:
+  traefik:
+    name: traefik

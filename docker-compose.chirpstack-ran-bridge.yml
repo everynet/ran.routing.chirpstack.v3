@@ -1,0 +1,30 @@
+version: '3'
+
+services:
+  chirpstack-ran-bridge:
+    build: .
+    restart: unless-stopped
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+
+      - CHIRPSTACK_API_TOKEN
+      - CHIRPSTACK_API_GRPC_HOST=${CHIRPSTACK_API_GRPC_HOST:-chirpstack-application-server}
+      - CHIRPSTACK_API_GRPC_PORT=${CHIRPSTACK_API_GRPC_PORT:-8080}
+      - CHIRPSTACK_API_GRPC_SECURE
+
+      - CHIRPSTACK_MQTT_SERVER_URI=${CHIRPSTACK_MQTT_SERVER_URI:-mqtt://mosquitto:1883}
+
+      - CHIRPSTACK_GATEWAY_ID
+      - CHIRPSTACK_DEVICES_REFRESH_PERIOD=${CHIRPSTACK_DEVICES_REFRESH_PERIOD:-300}
+
+      - RAN_TOKEN
+      - RAN_COVERAGE_DOMAIN=${RAN_COVERAGE_DOMAIN:-dev}
+    logging:
+      driver: 'json-file'
+      options:
+        max-size: "100m"
+        max-file: "1"
+    depends_on:
+      - chirpstack-application-server
+      - chirpstack-network-server
+
