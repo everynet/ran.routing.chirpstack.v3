@@ -755,7 +755,7 @@ class ApplicationDeviceListProxy(ApplicationDeviceList):
         self._device_list = device_list
 
     async def on_device_updated(self, device: "Device", changed_fields: list[str]) -> None:
-        await self._device_list.on_device_updated(self._application_id, device, prev_device_field, changed_fields)
+        await self._device_list.on_device_updated(self._application_id, device, changed_fields)
 
     async def on_device_add(self, device: Device) -> None:
         await self._device_list.on_device_add(self._application_id, device)

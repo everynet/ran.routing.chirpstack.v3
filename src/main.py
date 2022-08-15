@@ -115,7 +115,6 @@ async def update_chirpstack_device_list_task(
             await chirpstack_dev_list.refresh()
             logger.info("ChirpStack device list updated")
             retry = 0
-            await asyncio.sleep(refresh_period)
         except Exception as e:
             logger.exception("Exception while refreshing ChirpStack list of devices")
             retry += 1
