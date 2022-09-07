@@ -2,6 +2,7 @@ import asyncio
 import itertools
 from time import time
 from typing import Optional
+from enum import Enum
 
 import pylorawan
 import structlog
@@ -12,6 +13,7 @@ from ran.routing.core.upstream import UpstreamConnection
 from ran.routing.core.downstream import DownstreamConnection
 
 from . import lorawan
+from .cache import Cache
 
 
 logger = structlog.getLogger(__name__)
@@ -40,6 +42,15 @@ class Downlink(BaseModel):
     radio: DownlinkRadioParams
     delay: int
 
+    def __hash__(self):
+        return id(self)
+
+
+class DownlinkResult(Enum):
+    OK = 0
+    ERROR = 1
+    TOO_LATE = 2
+
 
 class BaseTrafficHandler:
     async def handle_upstream_message(self, uplink: Uplink) -> Optional[Downlink]:
@@ -48,7 +59,7 @@ class BaseTrafficHandler:
     async def handle_downstream_ack(self, downlink: Downlink) -> None:
         pass
 
-    async def handle_dowstream_result(self, downlink: Downlink) -> None:
+    async def handle_dowstream_result(self, downlink: Downlink, result: DownlinkResult) -> None:
         pass
 
 
@@ -82,6 +93,8 @@ class TrafficManager:
         self.upstream: Optional[UpstreamConnection] = None
         self.downstream: Optional[DownstreamConnection] = None
         self.downstream_transaction_id = itertools.cycle(range(1, 2**32))
+        self.cached_result = Cache(ttl=5)
+        self.downlink_result = Cache(ttl=30)
 
     def populate_lora_messages(self, upstream_message: UpstreamMessage) -> list[tuple[int, bytearray]]:
         messages = []
@@ -96,23 +109,36 @@ class TrafficManager:
         # This variable is used to track correct MIC value.
         accepted_mic = None
 
-        # Client creates multiple messages with different MICs, obtained from MIC Challenge and pass each to Handler.
-        # NS must raise an MicChallengeFailed exception if it can't verify message with this MIC.
-        # Other exceptions are also treated as mic challenge error, and client will send REJECT for this message.
-        # TODO: how we need to handle other exceptions? Now we just break the loop.
-        for mic, lora_message_bytes in self.populate_lora_messages(upstream_message):
-            try:
-                uplink = Uplink(payload=lora_message_bytes, radio=upstream_message.radio)
-                downlink = await self.traffic_handler.handle_upstream_message(uplink)
+        # Making sure all cached results are valid
+        accepted_mic_future = self.cached_result.get(upstream_message.phy_payload_no_mic, None)
 
-            except RejectUplink:
-                pass
-            except Exception as e:
-                logger.exception(f"Exception in upstream handler: {e}")
-                break
-            else:
-                accepted_mic = mic
-                break
+        if accepted_mic_future is None:
+            accepted_mic_future = asyncio.Future()
+            self.cached_result.set(upstream_message.phy_payload_no_mic, accepted_mic_future)
+
+            # Client creates multiple messages with different MICs, obtained from MIC Challenge and pass each to Handler.
+            # NS must raise an MicChallengeFailed exception if it can't verify message with this MIC.
+            # Other exceptions are also treated as mic challenge error, and client will send REJECT for this message.
+            # TODO: how we need to handle other exceptions? Now we just break the loop.
+            for mic, lora_message_bytes in self.populate_lora_messages(upstream_message):
+                try:
+                    uplink = Uplink(payload=lora_message_bytes, radio=upstream_message.radio)
+                    downlink = await self.traffic_handler.handle_upstream_message(uplink)
+
+                except RejectUplink:
+                    pass
+                except Exception as e:
+                    logger.exception(f"Exception in upstream handler: {e}")
+                    break
+                else:
+                    accepted_mic = mic
+                    break
+
+            accepted_mic_future.set_result(accepted_mic)
+        else:
+            # TODO: better timeout value
+            await asyncio.wait_for(accepted_mic_future, self.cached_result._ttl)
+            accepted_mic = accepted_mic_future.result()
 
         # If we have no accepted MIC, we reject the message.
         if accepted_mic is None:
@@ -126,6 +152,7 @@ class TrafficManager:
         logger.debug("Mic challenge successful, sending ACK")
         # TODO: get device eui somehow. NS must also return DevEUI for device, which send uplink message.
         dev_eui = upstream_message.dev_euis[0]
+
         await self.upstream.send_upstream_ack(
             transaction_id=upstream_message.transaction_id, dev_eui=dev_eui, mic=accepted_mic
         )
@@ -147,6 +174,8 @@ class TrafficManager:
             tx_window=tx_window,
             phy_payload=downlink.payload,
         )
+
+        self.downlink_result.set(downstream_message.transaction_id, downlink)
 
         await self.downstream.send_downstream_object(downstream_message)
 
@@ -170,7 +199,16 @@ class TrafficManager:
             self.downstream = downstream_conn
 
             async for downstream_message in downstream_conn.stream():
-                # TODO: handle dowstream_ack, downstream_result
+                if isinstance(downstream_message, DownstreamResultMessage):
+                    downlink = self.downlink_result.pop(downstream_message.transaction_id, None)
+                    if downlink:
+                        downlink_result = DownlinkResult.ERROR
+                        if downstream_message.result_code == DownstreamResultCode.Success:
+                            downlink_result = DownlinkResult.OK
+                        elif downstream_message.result_code == DownstreamResultCode.TooLate:
+                            downlink_result = downlink_result.TOO_LATE
+
+                        await self.traffic_handler.handle_dowstream_result(downlink, downlink_result)
                 await asyncio.sleep(0)
 
     async def run(self):

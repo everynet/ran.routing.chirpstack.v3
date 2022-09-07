@@ -8,7 +8,7 @@ import structlog
 from chirpstack_api.common import common_pb2
 from chirpstack_api.gw import gw_pb2
 
-from .traffic_manager import RejectUplink
+from .traffic_manager import DownlinkResult, RejectUplink
 from .traffic_manager import Downlink
 from .traffic_manager import DownlinkRadioParams, UplinkRadioParams
 from .traffic_manager import LoRaModulation
@@ -16,6 +16,7 @@ from .traffic_manager import LoRaWANTrafficHandler as TrafficHandler
 
 from . import chirpstack
 from . import mqtt
+from . import cache
 
 
 logger = structlog.getLogger(__name__)
@@ -26,6 +27,7 @@ class LoRaWANTrafficHandler(TrafficHandler):
         self.gateway_mac = gateway_mac
         self.devices = devices
         self.chirpstack_mqtt_client = chirpstack_mqtt_client
+        self.chirpstack_downlinks = cache.Cache(ttl=10)
 
     def create_chirpstack_uplink(self, lorawan_message: bytes, radio_params: UplinkRadioParams) -> gw_pb2.UplinkFrame:
         location = common_pb2.Location()
@@ -137,6 +139,7 @@ class LoRaWANTrafficHandler(TrafficHandler):
         self, phy_payload: pylorawan.message.PHYPayload, radio: UplinkRadioParams
     ) -> Optional[Downlink]:
         dev_addr = hex(phy_payload.payload.fhdr.dev_addr)[2:].zfill(8)
+        downlink = None
 
         device = self.devices.get_device(dev_addr)
         if not device:
@@ -149,9 +152,10 @@ class LoRaWANTrafficHandler(TrafficHandler):
             logger.info("Uplink received", decoded=phy_payload.as_dict(), raw=phy_payload.generate().hex())
             chirpstack_downlink_frame = await self.chirpstack_send_and_receive(phy_payload, radio, 16)
             if chirpstack_downlink_frame:
-                return self.create_downlink(chirpstack_downlink_frame)
+                downlink = self.create_downlink(chirpstack_downlink_frame)
+                self.chirpstack_downlinks.set(downlink, chirpstack_downlink_frame)
 
-        return None
+        return downlink
 
     async def handle_join_request(
         self, phy_payload: pylorawan.message.PHYPayload, radio: UplinkRadioParams
@@ -161,6 +165,10 @@ class LoRaWANTrafficHandler(TrafficHandler):
         device = self.devices.get_device(dev_eui)
         if not device:
             logger.warning("handle_join_request: device not found", dev_eui=dev_eui)
+            return None
+
+        if device.nwk_key is None:
+            logger.error("Join cannot be processed, app_key not set!", dev_eui=dev_eui)
             return None
 
         self._check_mic(phy_payload, bytes.fromhex(device.nwk_key))
@@ -179,3 +187,24 @@ class LoRaWANTrafficHandler(TrafficHandler):
             self.devices.merge_device(device)
 
             return self.create_downlink(chirpstack_downlink_frame, device.dev_addr)
+
+    async def handle_dowstream_result(self, downlink: Downlink, downlink_result: DownlinkResult) -> None:
+        chirpstack_downlink_frame = self.chirpstack_downlinks.get(downlink, None)
+        if chirpstack_downlink_frame:
+            item = gw_pb2.DownlinkTXAckItem()
+
+            item.status = gw_pb2.TxAckStatus.INTERNAL_ERROR
+            if downlink_result == DownlinkResult.OK:
+                item.status = gw_pb2.TxAckStatus.OK
+            elif downlink_result == DownlinkResult.TOO_LATE:
+                item.status = gw_pb2.TOO_LATE
+
+            downlink_tx_ack = gw_pb2.DownlinkTXAck()
+            downlink_tx_ack.gateway_id = bytes.fromhex(self.gateway_mac)
+            downlink_tx_ack.downlink_id = chirpstack_downlink_frame.downlink_id
+            downlink_tx_ack.items.append(item)
+
+            chirpstack_downlink_ack_topic = "gateway/{}/ack".format(self.gateway_mac)
+            await self.chirpstack_mqtt_client.publish(
+                chirpstack_downlink_ack_topic, downlink_tx_ack.SerializeToString()
+            )
