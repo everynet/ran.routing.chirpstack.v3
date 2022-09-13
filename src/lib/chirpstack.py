@@ -731,9 +731,9 @@ class FlatDeviceList(DeviceList):
 
     def merge_device(self, device) -> None:
         for app in self._applications.values():
-            device = app.get_device(device.dev_eui)
-            if device:
-                app.merge_device(device)
+            app_device = app.get_device(device.dev_eui)
+            if app_device:
+                app.merge_device(app_device)
                 break
         return None
 

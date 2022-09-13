@@ -10,6 +10,7 @@ import pylorawan
 from lib.traffic_manager import UplinkRadioParams
 from lib.traffic_manager import LoRaModulation
 from lib.traffic_handler import LoRaWANTrafficHandler
+from lib.traffic_manager import DownlinkResult
 from lib import chirpstack
 from lib import lorawan
 
@@ -172,6 +173,7 @@ async def test_otaa_uplink(chirpstack_api, chirpstack_mqtt_client, device_otaa, 
     stream_frame_logs = chirpstack_api.stream_frame_logs(device_otaa["dev_eui"], 10)
     frame = await anext(stream_frame_logs)
 
+    assert frame.uplink_frame.phy_payload_json
     join_request_frame = json.loads(frame.uplink_frame.phy_payload_json)
     assert join_request_frame["mhdr"]["mType"] == "JoinRequest"
     assert join_request_frame["macPayload"]["devEUI"] == device_otaa["dev_eui"]
@@ -186,8 +188,14 @@ async def test_otaa_uplink(chirpstack_api, chirpstack_mqtt_client, device_otaa, 
     assert hex(join_accept.dev_addr)[2:].zfill(8) == device.dev_addr
     logger.info("JoinAccept messages confirmed!")
 
-    await devices.refresh()
-    await asyncio.sleep(2)
+    # Downlink ACK
+    await lorawan_traffic_handler.handle_dowstream_result(downlink, DownlinkResult.OK)
+
+    frame = await anext(stream_frame_logs)
+
+    assert frame.downlink_frame.phy_payload_json
+    join_accept_frame = json.loads(frame.downlink_frame.phy_payload_json)
+    assert join_accept_frame["mhdr"]["mType"] == "JoinAccept"
 
     # Test uplink for joined device
     message_payload = secrets.token_bytes(6)
@@ -204,10 +212,14 @@ async def test_otaa_uplink(chirpstack_api, chirpstack_mqtt_client, device_otaa, 
 
     frame = await anext(stream_frame_logs)
 
+    assert frame.uplink_frame.phy_payload_json
     unconfirmed_data_up_frame = json.loads(frame.uplink_frame.phy_payload_json)
     assert unconfirmed_data_up_frame["mhdr"]["mType"] == "UnconfirmedDataUp"
     assert unconfirmed_data_up_frame["macPayload"]["fhdr"]["devAddr"] == device.dev_addr
     logger.info("UnconfirmedDataUp aftre join confirmed!")
+
+    # Downlink ACK
+    await lorawan_traffic_handler.handle_dowstream_result(downlink, DownlinkResult.OK)
 
     mqtt_client_task.cancel()
 
@@ -239,7 +251,10 @@ async def test_abp_uplink(chirpstack_api, chirpstack_mqtt_client, device_abp, ga
 
     downlink = await lorawan_traffic_handler.handle_uplink(message, uplink_radio_params)
 
-    frame = await anext(chirpstack_api.stream_frame_logs(device_abp["dev_eui"], 10))
+    stream_frame_logs = chirpstack_api.stream_frame_logs(device_abp["dev_eui"], 10)
+    frame = await anext(stream_frame_logs)
+
+    assert frame.uplink_frame.phy_payload_json
     uplink_frame = json.loads(frame.uplink_frame.phy_payload_json)
     uplink_frame_payload = base64.b64decode(uplink_frame["macPayload"]["frmPayload"][0]["bytes"])
     assert uplink_frame["mhdr"]["mType"] == "ConfirmedDataUp"
@@ -252,5 +267,13 @@ async def test_abp_uplink(chirpstack_api, chirpstack_mqtt_client, device_abp, ga
         pylorawan.message.MType.UnconfirmedDataDown,
     ]
     assert phypayload.payload.fhdr.f_ctrl.ack == True
+
+    # Downlink ack and down message test
+    await lorawan_traffic_handler.handle_dowstream_result(downlink, DownlinkResult.OK)
+    frame = await anext(stream_frame_logs)
+
+    assert frame.downlink_frame.phy_payload_json
+    downlink_frame = json.loads(frame.downlink_frame.phy_payload_json)
+    assert downlink_frame["mhdr"]["mType"] == "UnconfirmedDataDown"
 
     mqtt_client_task.cancel()

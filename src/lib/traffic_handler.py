@@ -186,7 +186,10 @@ class LoRaWANTrafficHandler(TrafficHandler):
             await device.refresh()
             self.devices.merge_device(device)
 
-            return self.create_downlink(chirpstack_downlink_frame, device.dev_addr)
+            downlink = self.create_downlink(chirpstack_downlink_frame, device.dev_addr)
+            self.chirpstack_downlinks.set(downlink, chirpstack_downlink_frame)
+
+            return downlink
 
     async def handle_dowstream_result(self, downlink: Downlink, downlink_result: DownlinkResult) -> None:
         chirpstack_downlink_frame = self.chirpstack_downlinks.get(downlink, None)
@@ -202,9 +205,10 @@ class LoRaWANTrafficHandler(TrafficHandler):
             downlink_tx_ack = gw_pb2.DownlinkTXAck()
             downlink_tx_ack.gateway_id = bytes.fromhex(self.gateway_mac)
             downlink_tx_ack.downlink_id = chirpstack_downlink_frame.downlink_id
+            downlink_tx_ack.token = chirpstack_downlink_frame.token
             downlink_tx_ack.items.append(item)
 
-            chirpstack_downlink_ack_topic = "gateway/{}/ack".format(self.gateway_mac)
+            chirpstack_downlink_ack_topic = "gateway/{}/event/ack".format(self.gateway_mac)
             await self.chirpstack_mqtt_client.publish(
                 chirpstack_downlink_ack_topic, downlink_tx_ack.SerializeToString()
             )
