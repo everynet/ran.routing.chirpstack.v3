@@ -104,9 +104,7 @@ async def get_gateway(chirpstack_api: chirpstack.ChirpStackAPI, gateway_id: str)
     return gateway.gateway
 
 
-async def update_chirpstack_device_list_task(
-    chirpstack_dev_list: chirpstack.DeviceList, refresh_period: int
-) -> None:
+async def update_chirpstack_device_list_task(chirpstack_dev_list: chirpstack.DeviceList, refresh_period: int) -> None:
     min_refresh_period = 30
     retry = 0
 
@@ -150,6 +148,7 @@ async def main():
 
     logger.info("Cleanup RAN device list")
     await ran_core.routing_table.delete_all()
+    logger.info("Cleanup done")
 
     logger.info("Loading ChirpStack devices list")
     chirpstack_devices = ChirpStackDevices(ran_core, chirpstack_api, tags)

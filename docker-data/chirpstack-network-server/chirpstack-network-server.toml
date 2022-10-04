@@ -17,6 +17,7 @@ net_id="000000"
 name="EU868"
 
 [network_server.network_settings]
+rx1_delay=5
 
   [[network_server.network_settings.extra_channels]]
   frequency=867100000

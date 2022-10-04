@@ -2,6 +2,7 @@ import secrets
 import asyncio
 import json
 import base64
+from time import sleep
 
 import structlog
 import pytest
@@ -275,5 +276,54 @@ async def test_abp_uplink(chirpstack_api, chirpstack_mqtt_client, device_abp, ga
     assert frame.downlink_frame.phy_payload_json
     downlink_frame = json.loads(frame.downlink_frame.phy_payload_json)
     assert downlink_frame["mhdr"]["mType"] == "UnconfirmedDataDown"
+
+    mqtt_client_task.cancel()
+
+
+async def generate_and_send_join_request(device, lorawan_traffic_handler):
+    lora_modulation = LoRaModulation(spreading=12, bandwidth=125000)
+    uplink_radio_params = UplinkRadioParams(frequency=867100000, rssi=-120, snr=1.0, lora=lora_modulation)
+
+    message = lorawan.generate_join_request(
+        device_otaa["nwk_key"],
+        device_otaa["app_eui"],
+        device_otaa["dev_eui"],
+    )
+
+    # Handle join request by ChirpStack and get downlink response
+    downlink = await lorawan_traffic_handler.handle_join_request(message, uplink_radio_params)
+    await device.refresh()
+
+    mhdr = pylorawan.message.MHDR.parse(downlink.payload[:1])
+    assert mhdr.mtype == pylorawan.message.MType.JoinAccept
+
+    join_accept = pylorawan.message.JoinAccept.parse(downlink.payload, bytes.fromhex(device.nwk_key))
+    assert hex(join_accept.dev_addr)[2:].zfill(8) == device.dev_addr
+    logger.info("JoinAccept messages confirmed!")
+
+
+async def test_join_raсe(chirpstack_api, chirpstack_mqtt_client, device_otaa, gateway):
+    devices = chirpstack.FlatDeviceList(chirpstack_api)
+    await devices.refresh()
+    device = devices.get_device(device_otaa["dev_eui"])
+
+    # Init mqtt client
+    mqtt_client_task = asyncio.create_task(chirpstack_mqtt_client.run())
+    await chirpstack_mqtt_client.wait_for_connection(10)
+
+    lorawan_traffic_handler = LoRaWANTrafficHandler(
+        gateway["gateway_id"], chirpstack_mqtt_client=chirpstack_mqtt_client, devices=devices
+    )
+
+    # Device is fresh new?
+    assert device.dev_addr is None
+
+    # Send join request #1
+    await generate_and_send_join_request(device, lorawan_traffic_handler)
+
+    await asyncio.sleep(2)
+
+    # Send join request #2
+    await generate_and_send_join_request(device, lorawan_traffic_handler)
 
     mqtt_client_task.cancel()

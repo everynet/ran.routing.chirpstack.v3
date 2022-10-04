@@ -103,8 +103,7 @@ class TrafficManager:
             messages.append((mic_int, upstream_message.phy_payload_no_mic + mic))
         return messages
 
-    async def handle_upstream_message(self, upstream_message: UpstreamMessage) -> Optional[DownstreamMessage]:
-        # "handle_upstream_message" can fail with exception, but we want to create empty "downstream" message anyway.
+    async def handle_upstream_message(self, upstream_message: UpstreamMessage):
         downlink = None
         # This variable is used to track correct MIC value.
         accepted_mic = None
@@ -134,11 +133,20 @@ class TrafficManager:
                     accepted_mic = mic
                     break
 
-            accepted_mic_future.set_result(accepted_mic)
+            if not accepted_mic_future.done():
+                accepted_mic_future.set_result(accepted_mic)
         else:
-            # TODO: better timeout value
-            await asyncio.wait_for(accepted_mic_future, self.cached_result._ttl)
-            accepted_mic = accepted_mic_future.result()
+            try:
+                # TODO: better timeout value
+                await asyncio.wait_for(accepted_mic_future, self.cached_result._ttl)
+                accepted_mic = accepted_mic_future.result()
+            except asyncio.TimeoutError:
+                # Timeout from ChirpStack handle_upstream_message
+                pass
+
+        if not self.upstream:
+            logger.error("Upstream not ready for transmission!")
+            return
 
         # If we have no accepted MIC, we reject the message.
         if accepted_mic is None:
@@ -146,7 +154,7 @@ class TrafficManager:
             await self.upstream.send_upstream_reject(
                 transaction_id=upstream_message.transaction_id, result_code=UpstreamRejectResultCode.MICFailed
             )
-            return None
+            return
 
         # If mic is accepted, we send an ACK for this message.
         logger.debug("Mic challenge successful, sending ACK")
@@ -159,7 +167,7 @@ class TrafficManager:
 
         # Convert Downlink to UpstreamMessage
         if not downlink:
-            return None
+            return
 
         target_dev_addr = downlink.target_dev_addr
         if target_dev_addr:
@@ -177,6 +185,10 @@ class TrafficManager:
 
         self.downlink_result.set(downstream_message.transaction_id, downlink)
 
+        if not self.downstream:
+            logger.error("Downstream not ready for transmission!")
+            return
+
         await self.downstream.send_downstream_object(downstream_message)
 
     async def _run_upstream_loop(self) -> None:
@@ -185,31 +197,36 @@ class TrafficManager:
         async with self.ran_core.upstream() as upstream_conn:
             self.upstream = upstream_conn
 
-            async for upstream_message in upstream_conn.stream():
-                if len(tasks) > 1000:
-                    logger.warning("Too many unfinished tasks. Dropping upstream message")
-                    continue
+            try:
+                async for upstream_message in upstream_conn.stream():
+                    if len(tasks) > 1000:
+                        logger.warning("Too many unfinished tasks. Dropping upstream message")
+                        continue
 
-                task = asyncio.create_task(self.handle_upstream_message(upstream_message))
-                tasks.add(task)
-                task.add_done_callback(tasks.discard)
+                    task = asyncio.create_task(self.handle_upstream_message(upstream_message))
+                    tasks.add(task)
+                    task.add_done_callback(tasks.discard)
+            finally:
+                self.upstream = None
 
     async def _run_downstream_loop(self):
         async with self.ran_core.downstream() as downstream_conn:
             self.downstream = downstream_conn
 
-            async for downstream_message in downstream_conn.stream():
-                if isinstance(downstream_message, DownstreamResultMessage):
-                    downlink = self.downlink_result.pop(downstream_message.transaction_id, None)
-                    if downlink:
-                        downlink_result = DownlinkResult.ERROR
-                        if downstream_message.result_code == DownstreamResultCode.Success:
-                            downlink_result = DownlinkResult.OK
-                        elif downstream_message.result_code == DownstreamResultCode.TooLate:
-                            downlink_result = downlink_result.TOO_LATE
+            try:
+                async for downstream_message in downstream_conn.stream():
+                    if isinstance(downstream_message, DownstreamResultMessage):
+                        downlink = self.downlink_result.pop(downstream_message.transaction_id, None)
+                        if downlink:
+                            downlink_result = DownlinkResult.ERROR
+                            if downstream_message.result_code == DownstreamResultCode.Success:
+                                downlink_result = DownlinkResult.OK
+                            elif downstream_message.result_code == DownstreamResultCode.TooLate:
+                                downlink_result = downlink_result.TOO_LATE
 
-                        await self.traffic_handler.handle_dowstream_result(downlink, downlink_result)
-                await asyncio.sleep(0)
+                            await self.traffic_handler.handle_dowstream_result(downlink, downlink_result)
+            finally:
+                self.downstream = None
 
     async def run(self):
         max_delay = 30
@@ -220,14 +237,21 @@ class TrafficManager:
             start_time = time()
             run_upstream_loop_task = asyncio.create_task(self._run_upstream_loop())
             run_downstream_loop_task = asyncio.create_task(self._run_downstream_loop())
-            _, pending = await asyncio.wait(
+            done, pending = await asyncio.wait(
                 {run_upstream_loop_task, run_downstream_loop_task}, return_when=asyncio.FIRST_COMPLETED
             )
+
+            logger.warning(f"Some of background tasks ended unexpectedly: {done}")
 
             # Extract pending task and cancel it
             if pending:
                 task = pending.pop()
                 task.cancel()
+
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
             # Are we crashing too fast?
             if time() - start_time < min_delay:
@@ -235,4 +259,5 @@ class TrafficManager:
             else:
                 delay = min_delay
 
-            asyncio.sleep(delay)
+            logger.info(f"Reconecting with delay: {delay} sec")
+            await asyncio.sleep(delay)
