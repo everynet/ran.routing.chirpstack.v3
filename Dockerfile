@@ -1,4 +1,4 @@
-FROM python:3.9.7-slim-buster as builder
+FROM python:3.10.8-slim-buster as builder
 
 ARG ENVIRONMENT
 ENV ENVIRONMENT=${ENVIRONMENT:-production}
@@ -23,7 +23,7 @@ COPY pyproject.toml /
 RUN poetry install --no-dev --no-root \
     && if [ "$ENVIRONMENT" = "development" ]; then poetry install; fi
 
-FROM python:3.9.7-slim-buster
+FROM python:3.10.8-slim-buster
 
 COPY --from=builder /usr/local /usr/local
 

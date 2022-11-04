@@ -2,6 +2,7 @@ import logging
 import logging.config
 
 import structlog
+from google.protobuf.json_format import MessageToDict
 
 
 def configure_logging(log_level="info", console_colors=True):
@@ -26,6 +27,8 @@ def configure_logging(log_level="info", console_colors=True):
         # Here you can add processors for external library loggers
     ]
     structlog_processors = [
+        # This will filter structlog records by level before passing it to other processors
+        structlog.stdlib.filter_by_level,
         *processor_chain,
         # Required to actually print log records from structlog loggers into logging
         structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
@@ -59,3 +62,32 @@ def configure_logging(log_level="info", console_colors=True):
         wrapper_class=structlog.stdlib.BoundLogger,  # noqa
         cache_logger_on_first_use=True,
     )
+
+
+class LazyFormat:
+    __sentinel = object()
+
+    def __init__(self, fn, *args, **kwargs) -> None:
+        self._fn = fn
+        self._args = args
+        self._kwargs = kwargs
+        self.__evaluated = self.__sentinel
+
+    def __evaluate(self):
+        if self.__evaluated is self.__sentinel:
+            self.__evaluated = self._fn(*self._args, **self._kwargs)
+        return self.__evaluated
+
+    def __str__(self) -> str:
+        return str(self.__evaluate())
+
+    def __repr__(self):
+        return repr(self.__evaluate())
+
+
+def lazy_protobuf_fmt(struct):
+    return LazyFormat(MessageToDict, struct)
+
+
+def lazy_fmt(fn, *args, **kwargs):
+    return LazyFormat(fn, *args, **kwargs)

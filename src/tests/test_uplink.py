@@ -190,7 +190,7 @@ async def test_otaa_uplink(chirpstack_api, chirpstack_mqtt_client, device_otaa, 
     logger.info("JoinAccept messages confirmed!")
 
     # Downlink ACK
-    await lorawan_traffic_handler.handle_dowstream_result(downlink, DownlinkResult.OK)
+    await lorawan_traffic_handler.handle_downstream_result(downlink, DownlinkResult.OK)
 
     frame = await anext(stream_frame_logs)
 
@@ -220,7 +220,7 @@ async def test_otaa_uplink(chirpstack_api, chirpstack_mqtt_client, device_otaa, 
     logger.info("UnconfirmedDataUp aftre join confirmed!")
 
     # Downlink ACK
-    await lorawan_traffic_handler.handle_dowstream_result(downlink, DownlinkResult.OK)
+    await lorawan_traffic_handler.handle_downstream_result(downlink, DownlinkResult.OK)
 
     mqtt_client_task.cancel()
 
@@ -270,7 +270,7 @@ async def test_abp_uplink(chirpstack_api, chirpstack_mqtt_client, device_abp, ga
     assert phypayload.payload.fhdr.f_ctrl.ack == True
 
     # Downlink ack and down message test
-    await lorawan_traffic_handler.handle_dowstream_result(downlink, DownlinkResult.OK)
+    await lorawan_traffic_handler.handle_downstream_result(downlink, DownlinkResult.OK)
     frame = await anext(stream_frame_logs)
 
     assert frame.downlink_frame.phy_payload_json

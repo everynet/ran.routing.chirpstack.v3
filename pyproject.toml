@@ -1,11 +1,11 @@
 [tool.poetry]
-name = "pico-ns"
-version = "0.1.0"
+name = "ran-chirpstack-bridge"
+version = "0.2.0"
 description = ""
 authors = ["Everynet"]
 
 [tool.poetry.dependencies]
-python = "^3.9"
+python = "^3.10"
 pydantic = {extras = ["dotenv"], version = "^1.9.0"}
 uvloop = "^0.16.0"
 structlog = "^21.5.0"
@@ -22,13 +22,14 @@ ran = {git = "https://github.com/everynet/ran.routing.pyclient.git", rev = "main
 
 
 [tool.poetry.dev-dependencies]
-black = "^22.1.0"
+black = "^22.10.0"
 isort = "^5.10.1"
 bandit = "^1.7.4"
 flake8 = "^4.0.1"
 flake8-bugbear = "^22.1.11"
 flake8-isort = "^4.1.1"
 flake8-bandit = "^3.0.0"
+mypy = "^0.982"
 
 [tool.bandit]
 targets = ["src", "tests"]

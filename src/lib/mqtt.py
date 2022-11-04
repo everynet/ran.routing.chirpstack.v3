@@ -1,9 +1,8 @@
 import asyncio
-from contextlib import asynccontextmanager
-from urllib.parse import urlparse, unquote
-from contextlib import AsyncExitStack
-from typing import Any, Callable, Optional, Set, Tuple, Union
 from collections import defaultdict
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
+from typing import Any, AsyncGenerator, Callable, List, Optional, Set, Tuple, Union
+from urllib.parse import unquote, urlparse
 
 import structlog
 from asyncio_mqtt import Client as AsyncioClient
@@ -11,7 +10,6 @@ from asyncio_mqtt import MqttError
 from paho.mqtt.matcher import MQTTMatcher
 from paho.mqtt.properties import Properties
 from paho.mqtt.subscribeoptions import SubscribeOptions
-
 
 logger = structlog.getLogger(__name__)
 
@@ -23,7 +21,7 @@ class MQTTClient:
         """Set up client."""
         self._uri = uri
         self._client_options = client_options
-        self._client: AsyncioClient = None
+        self._client: AsyncioClient = None  # type: ignore
         self._create_client()
 
         self._reconnect_interval = 1
@@ -34,7 +32,7 @@ class MQTTClient:
     async def wait_for_connection(self, timeout=None):
         await asyncio.wait_for(self._connection_established.wait(), timeout)
 
-    def _get_mqtt_default_port(self, scheme):
+    def _get_mqtt_default_port(self, scheme: str) -> int:
         if scheme == "ws":
             return 80
         elif scheme == "wss":
@@ -120,13 +118,26 @@ class MQTTClient:
     async def on_disconnect(self):
         pass
 
-    async def run(self) -> None:
+    async def run(self, stop_event: asyncio.Event) -> None:
         """Run the MQTT client worker."""
         # Reconnect automatically until the client is stopped.
-        while True:
+        logger.info("Starting MQTT client")
+
+        async def disconnect_on_stop():
+            await stop_event.wait()
+            logger.debug("Stop signal received, closing MQTT client")
+            await self._client.disconnect()
+
+        disconnect_task = asyncio.create_task(disconnect_on_stop())
+
+        while not stop_event.is_set():
             try:
-                await self._subscribe_worker()
+                await self._subscribe_worker(stop_event)
             except MqttError as err:
+                if stop_event.is_set():
+                    await disconnect_task
+                    return
+
                 self._reconnect_interval = min(self._reconnect_interval * 2, 900)
                 logger.error(
                     "MQTT error. Reconnecting...",
@@ -135,13 +146,15 @@ class MQTTClient:
                 )
                 self._connection_established.clear()
                 await self.on_disconnect()
-                await asyncio.sleep(self._reconnect_interval)
+
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(stop_event.wait(), timeout=self._reconnect_interval)
+
                 self._create_client()  # reset connect/reconnect futures
 
-    async def _subscribe_worker(self) -> None:
+    async def _subscribe_worker(self, stop_event: asyncio.Event) -> None:
         """Connect and manage receive tasks."""
         async with AsyncExitStack() as stack:
-            tasks: Set[asyncio.Task] = set()
             # Connect to the MQTT broker.
             await stack.enter_async_context(self._client)
             # Reset the reconnect interval after successful connection.
@@ -162,12 +175,12 @@ class MQTTClient:
                         await listener.put([message.topic, message.payload])
 
     @asynccontextmanager
-    async def listen(self, topic_filter=None) -> asyncio.Queue:
+    async def listen(self, topic_filter=None) -> AsyncGenerator[asyncio.Queue[Tuple[str, bytes]], None]:
         if topic_filter is None:
             topic_filter = "#"
 
         listeners = set()
-        queue = asyncio.Queue()
+        queue: asyncio.Queue[Tuple[str, bytes]] = asyncio.Queue()
 
         try:
             listeners = self._listeners[topic_filter]

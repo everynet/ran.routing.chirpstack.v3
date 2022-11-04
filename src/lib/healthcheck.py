@@ -1,3 +1,4 @@
+import asyncio
 import typing
 import functools
 
@@ -31,14 +32,14 @@ class HealthcheckServer:
         except Exception as e:
             logger.exception("Healthcheck exception", path=request.path)
             response_data["status"] = "fail"
-            response_data["reasone"] = str(e)
+            response_data["reason"] = str(e)
             respoinse_status_code = 422
 
         response = web.json_response(response_data)
         response.set_status(respoinse_status_code)
         return response
 
-    async def run(self, host: str = "0.0.0.0", port: int = 9090) -> None:
+    async def run(self, stop_event: asyncio.Event, host: str = "0.0.0.0", port: int = 9090) -> None:
         logger.info("Starting healthcheck server", host=host, port=port)
 
         runner = web.AppRunner(self._app)
@@ -46,4 +47,6 @@ class HealthcheckServer:
 
         site = web.TCPSite(runner, host=host, port=port)
         await site.start()
+        await stop_event.wait()
+        await site.stop()
         await site._server.wait_closed()
