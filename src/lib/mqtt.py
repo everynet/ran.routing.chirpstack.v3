@@ -132,7 +132,7 @@ class MQTTClient:
 
         while not stop_event.is_set():
             try:
-                await self._subscribe_worker(stop_event)
+                await self._subscribe_worker()
             except MqttError as err:
                 if stop_event.is_set():
                     await disconnect_task
@@ -152,7 +152,7 @@ class MQTTClient:
 
                 self._create_client()  # reset connect/reconnect futures
 
-    async def _subscribe_worker(self, stop_event: asyncio.Event) -> None:
+    async def _subscribe_worker(self) -> None:
         """Connect and manage receive tasks."""
         async with AsyncExitStack() as stack:
             # Connect to the MQTT broker.
@@ -165,10 +165,11 @@ class MQTTClient:
 
             if not self._connection_established.is_set():
                 self._connection_established.set()
+                logger.info("Connection established")
                 await self.on_connect()
 
             async for message in messages:
-                logger.info("Received message", topic=message.topic, payload=message.payload)
+                logger.debug("Received message", topic=message.topic, payload=message.payload)
 
                 for listeners in self._listeners.iter_match(message.topic):
                     for listener in listeners:

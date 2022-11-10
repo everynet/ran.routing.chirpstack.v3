@@ -27,7 +27,7 @@ def get_grpc_channel(host: str, port: str, secure: bool = True, cert_path: str =
     return channel
 
 
-async def get_or_create_ns(chirpstack_api, name, server):
+async def get_or_create_ns(chirpstack_api: chirpstack.ChirpStackAPI, name, server):
     async for network_server in chirpstack_api.get_network_servers(None):
         if network_server.server.lower() == server.lower():
             return network_server.id

@@ -245,16 +245,17 @@ class ChirpstackTrafficRouter:
             logger.debug("Device context obtained from cache (answering to uplink)", context_id=downlink.context_id)
             return DownlinkDeviceContext.Regular(dev_eui=device.dev_eui)
 
-        # If this downlink is not JoinAccept or class A downlink, we are trying to obtain device by it's DevAddr.
-        # Here we parsing lora message, to extract target device's DevAddr
-        parsed_downlink = pylorawan.message.PHYPayload.parse(downlink.payload)
-        if parsed_downlink.mhdr.mtype not in (
+        # We can handle only ConfirmedDataDown/UnconfirmedDataDown downlinks
+        if mhdr.mtype not in (
             pylorawan.message.MType.ConfirmedDataDown,
             pylorawan.message.MType.UnconfirmedDataDown,
         ):
-            logger.warning("Downlink has unknown type", downlink_type=repr(parsed_downlink.mhdr.mtype))
+            logger.warning("Downlink has unknown type", downlink_type=repr(mhdr.mtype))
             return None
 
+        # If this downlink is not JoinAccept or class A downlink, we are trying to obtain device by it's DevAddr.
+        # Here we parsing lora message, to extract target device's DevAddr
+        parsed_downlink = pylorawan.message.PHYPayload.parse(downlink.payload)
         str_dev_addr = f"{parsed_downlink.payload.fhdr.dev_addr:08x}"
         device = self.devices.get_device_by_dev_addr(str_dev_addr)
 

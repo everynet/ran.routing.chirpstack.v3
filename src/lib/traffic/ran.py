@@ -57,18 +57,18 @@ def as_transmission_window(radio: DownlinkRadioParams, timing: DownlinkTiming.Ti
 
 class UplinkAckSync:
     def __init__(self, ttl=60) -> None:
-        self._cahce: Cache[str, UplinkAck] = Cache(ttl=ttl)
+        self._cache: Cache[str, UplinkAck] = Cache(ttl=ttl)
         self._waiters: dict[str, set[asyncio.Future[UplinkAck]]] = defaultdict(set)
         self._lock = asyncio.Lock()
 
     def set_ack(self, context_id, uplink_ack: UplinkAck):
-        self._cahce.set(context_id, uplink_ack)
+        self._cache.set(context_id, uplink_ack)
 
     def has_ack(self, context_id: str) -> bool:
-        return self._cahce.get(context_id, None) is not None
+        return self._cache.get(context_id, None) is not None
 
     def get_ack(self, context_id: str) -> UplinkAck | None:
-        return self._cahce.get(context_id, None)
+        return self._cache.get(context_id, None)
 
     def __loop_pass(self):
         need_removal = []
@@ -76,7 +76,7 @@ class UplinkAckSync:
             if not len(waiters):
                 need_removal.append(context_id)
                 continue
-            uplink_ack = self._cahce.get(context_id)
+            uplink_ack = self._cache.get(context_id)
             if not uplink_ack:
                 continue
             for waiter in waiters.copy():
@@ -109,12 +109,12 @@ class RanTrafficRouter:
         self.downstream: Optional[DownstreamConnection] = None
         self.downstream_transaction_id = itertools.cycle(range(1, 2**32))
 
-        # Cache to prevent dublicates and track transaction id
+        # Cache to prevent duplicates and track transaction id
         self._upstream_id_to_transaction: Cache[str, int] = Cache(ttl=60)
         self._downstream_transaction_to_id: Cache[int, str] = Cache(ttl=60)
 
-        # Duplicate acks stuff
-        self._acks_sync = UplinkAckSync(ttl=60)
+        # Ack's for duplicated uplinks stuff
+        self._ack_sync = UplinkAckSync(ttl=60)
         self._ack_submitters_pool = Pool(64)
 
         # Mic challenge state
@@ -199,7 +199,7 @@ class RanTrafficRouter:
         log = logger.bind(transaction_id=transaction_id)
         if isinstance(ack_or_reject, UplinkAck):
             # Tracking upstream ack, which will be used for ack'ing duplicate
-            self._acks_sync.set_ack(ack_or_reject.context_id, ack_or_reject)
+            self._ack_sync.set_ack(ack_or_reject.context_id, ack_or_reject)
             await self.upstream.send_upstream_ack(  # type: ignore
                 transaction_id=transaction_id, dev_eui=int(ack_or_reject.dev_eui, 16), mic=ack_or_reject.mic
             )
@@ -274,7 +274,7 @@ class RanTrafficRouter:
         # uplink_id is unique for same phy-payload (without mic). Actually, this is not UUID, but md5 checksum,
         # represented as UUID. This solution used used for two purposes:
         # 1. Make upstream messages unique, based on their payload - required for deduplication
-        # 2. Make this identifier compatable with chirpstack "uplink_id" field - it requires 16-bytes UUID's
+        # 2. Make this identifier compatible with chirpstack "uplink_id" field - it requires 16-bytes UUID's
         uplink_payload_checksum = hashlib.md5(bytes(upstream_message.phy_payload_no_mic), usedforsecurity=True).digest()
         uplink_id = str(UUID(bytes=uplink_payload_checksum))
 
@@ -286,15 +286,15 @@ class RanTrafficRouter:
             logger.debug(
                 "Upstream message is duplicate, already answered with downlink. It will be not forwarded to chirpstack"
             )
-            last_ack: UplinkAck | None = self._acks_sync.get_ack(uplink_id)
+            last_ack: UplinkAck | None = self._ack_sync.get_ack(uplink_id)
             if last_ack is not None:
                 await self.upstream.send_upstream_ack(  # type: ignore
                     transaction_id=upstream_message.transaction_id, dev_eui=int(last_ack.dev_eui, 16), mic=last_ack.mic
                 )
                 logger.debug("Mic challenge successful for upstream duplicate (obtained from cache), ack sent")
                 return
-            logger.debug("No solved mic chellenge cached. Ack send scheduled, until MIC is calculated")
-            uplink_ack_waiter = await self._acks_sync.make_ack_waiter(uplink_id)
+            logger.debug("No solved mic challenge cached. Ack send scheduled, until MIC is calculated")
+            uplink_ack_waiter = await self._ack_sync.make_ack_waiter(uplink_id)
             await self._ack_submitters_pool.add(
                 self._submit_ack_when_available(upstream_message.transaction_id, uplink_ack_waiter)
             )
@@ -363,7 +363,7 @@ class RanTrafficRouter:
         max_delay = 30
         min_delay = 5
         delay = min_delay
-        asck_sync_task = asyncio.create_task(self._acks_sync.run(stop_event))
+        ack_sync_task = asyncio.create_task(self._ack_sync.run(stop_event))
 
         async def disconnect_on_stop():
             await stop_event.wait()
@@ -408,4 +408,4 @@ class RanTrafficRouter:
             logger.info(f"Reconecting with delay: {delay} sec")
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(stop_event.wait(), timeout=delay)
-        await asck_sync_task
+        await ack_sync_task
