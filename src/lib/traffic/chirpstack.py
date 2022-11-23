@@ -47,6 +47,12 @@ class ChirpstackTrafficRouter:
         # Communication
         self._downlinks_from_chirpstack: asyncio.Queue[Downlink] = asyncio.Queue()
 
+        # Storing amount of not-processed ack's per downlink_id
+        self._ignored_downlinks_count: cache.Cache[str, int] = cache.Cache(ttl=100)
+
+        # Storing downlink frame tokens, used as fallback for chirpstack internal context
+        self._downlink_id_to_frame_token: cache.Cache[str, int] = cache.Cache(ttl=100)
+
     @property
     def downstream_rx(self):
         return self._downlinks_from_chirpstack
@@ -91,6 +97,10 @@ class ChirpstackTrafficRouter:
         return chirpstack_uplink
 
     def _create_ran_downlinks(self, chirpstack_downlink_frame: gw_pb2.DownlinkFrame) -> list[Downlink]:
+        downlink_id = str(uuid.UUID(bytes=chirpstack_downlink_frame.downlink_id))
+        logger.debug("Downstream frame token stored", downlink_id=downlink_id, token=chirpstack_downlink_frame.token)
+        self._downlink_id_to_frame_token.set(downlink_id, chirpstack_downlink_frame.token)
+
         downlinks = []
         for item in chirpstack_downlink_frame.items:
             if item.tx_info.modulation != common_pb2.Modulation.LORA:
@@ -124,7 +134,7 @@ class ChirpstackTrafficRouter:
                 chirpstack_context_id = str(uuid.uuid4())
 
             downlink = Downlink(
-                downlink_id=str(uuid.UUID(bytes=chirpstack_downlink_frame.downlink_id)),
+                downlink_id=downlink_id,
                 context_id=chirpstack_context_id,
                 payload=item.phy_payload,
                 radio=downlink_radio_params,
@@ -197,29 +207,48 @@ class ChirpstackTrafficRouter:
         logger.debug("UplinkAck message created", uplink_ack=repr(uplink_ack))
         return uplink_ack
 
-    async def handle_downstream_result(self, downlink_result: DownlinkResult) -> None:
-        logger.debug("Handling downstream result", downlink_result=repr(downlink_result))
-        item = gw_pb2.DownlinkTXAckItem()
-
-        if downlink_result.status == DownlinkResultStatus.OK:
-            item.status = gw_pb2.TxAckStatus.OK
-        elif downlink_result.status == DownlinkResultStatus.TOO_LATE:
-            item.status = gw_pb2.TxAckStatus.TOO_LATE
-        elif downlink_result.status == DownlinkResultStatus.ERROR:
-            item.status = gw_pb2.TxAckStatus.INTERNAL_ERROR
-        else:
-            logger.error(f"Unknown downlink result status: {downlink_result.status}")
-            return
-
+    async def _send_tx_ack(self, downlink_id: str, ack_statuses: list[gw_pb2.TxAckStatus]):
         downlink_tx_ack = gw_pb2.DownlinkTXAck()
         downlink_tx_ack.gateway_id = bytes.fromhex(self.gateway_mac)
-        downlink_tx_ack.downlink_id = uuid.UUID(hex=downlink_result.downlink_id).bytes
-        # downlink_tx_ack.token = chirpstack_downlink_frame.token  # NOTE: deprecated
-        downlink_tx_ack.items.append(item)
+        downlink_tx_ack.downlink_id = uuid.UUID(hex=downlink_id).bytes
+        # NOTE: Token added as fallback, if chirpstack misses own local context.
+        # https://github.com/brocaar/chirpstack-network-server/blob/d11e570763586b9366b995d679463877d9512e15/internal/downlink/ack/ack.go#L265
+        if (token := self._downlink_id_to_frame_token.get(downlink_id, None)) is not None:
+            logger.debug("Downstream frame token obtained from memory", downlink_id=downlink_id, token=token)
+            downlink_tx_ack.token = token
+        else:
+            logger.warning("Downstream frame token missed", downlink_id=downlink_id)
+
+        for ack_status in ack_statuses:
+            item = gw_pb2.DownlinkTXAckItem(status=ack_status)
+            downlink_tx_ack.items.append(item)
 
         chirpstack_downlink_ack_topic = "gateway/{}/event/ack".format(self.gateway_mac)
         await self.chirpstack_mqtt_client.publish(chirpstack_downlink_ack_topic, downlink_tx_ack.SerializeToString())
         logger.debug("DownlinkTXAck forwarded to chirpstack", chirpstack_tx_ack=lazy_protobuf_fmt(downlink_tx_ack))
+
+    async def handle_downstream_result(self, downlink_result: DownlinkResult) -> None:
+        logger.debug("Handling downstream result", downlink_result=repr(downlink_result))
+        if downlink_result.status == DownlinkResultStatus.OK:
+            ack_status = gw_pb2.TxAckStatus.OK
+        elif downlink_result.status == DownlinkResultStatus.TOO_LATE:
+            ack_status = gw_pb2.TxAckStatus.TOO_LATE
+        elif downlink_result.status == DownlinkResultStatus.ERROR:
+            ack_status = gw_pb2.TxAckStatus.INTERNAL_ERROR
+        else:
+            logger.error(
+                f"Unknown downlink result status: {downlink_result.status}", downlink_id=downlink_result.downlink_id
+            )
+            return
+
+        # NOTE: "ack_statuses" list must has the same length as the request and indicates which
+        #   downlink frame has been emitted of the requested list (or why it failed).
+        #   All downlinks, except first one are ignored by bridge in its current state.
+        # EXTRA: https://github.com/brocaar/chirpstack-api/blob/master/protobuf/gw/gw.proto#L414
+        # TODO: Consume all Ack's from ran-routing, when it supports multiple TxWindow's.
+        acks_to_ignore: int = self._ignored_downlinks_count.get(downlink_result.downlink_id, 0)  # type: ignore
+        ack_statuses = [ack_status] + [gw_pb2.TxAckStatus.IGNORED for _ in range(acks_to_ignore)]
+        await self._send_tx_ack(downlink_result.downlink_id, ack_statuses)
 
     async def _fetch_downlink_device_context(self, downlink: Downlink) -> Optional[DownlinkDeviceContext.ContextBase]:
         device: Device | None = self._chirpstack_context_to_device.get(downlink.context_id, None)
@@ -276,6 +305,30 @@ class ChirpstackTrafficRouter:
         # If nothing is found after all steps - we have no devices or multicast groups with this DevAddr stored.
         return None
 
+    async def _process_downlink_frame(self, downlink_frame: gw_pb2.DownlinkFrame):
+        # NOTE: ChirpStack may return two downlinks, when answering on class A uplink.
+        #   This downlinks will contain same downlink message with different TMST - for RX1 and RX2 window.
+        #   Here we send first one to ran-routing, and reply with ack to rest of downlinks.
+        # TODO: Send all downlinks to ran-routing, when it supports multiple TxWindow's.
+        # EXTRA: https://github.com/brocaar/chirpstack-api/blob/master/protobuf/gw/gw.proto#L380
+        ran_downlinks = self._create_ran_downlinks(downlink_frame)
+
+        for idx, downlink in enumerate(ran_downlinks):
+            if idx > 0:
+                # Here we just counting all downlinks after first one, to send correct TxAck back to chirpstack, when
+                # Ack will have been received from ran-routing.
+                current_count: int = self._ignored_downlinks_count.get(downlink.downlink_id, 0)  # type: ignore
+                self._ignored_downlinks_count.set(downlink.downlink_id, current_count + 1)
+                continue
+            device_ctx = await self._fetch_downlink_device_context(downlink)
+            if device_ctx is not None:
+                # Setting device context, required for ran router
+                downlink.device_ctx = device_ctx
+                logger.debug("Downlink message assembled", downlink=repr(downlink))
+                await self._downlinks_from_chirpstack.put(downlink)
+            else:
+                logger.warning("Missed device context for downlink", downlink_id=downlink.downlink_id)
+
     async def run(self, stop_event: asyncio.Event):
         chirpstack_downlink_topic = "gateway/{}/command/down".format(self.gateway_mac)
         await self.chirpstack_mqtt_client.subscribe(chirpstack_downlink_topic)
@@ -288,25 +341,13 @@ class ChirpstackTrafficRouter:
                     if not payload:
                         continue
 
-                    chirpstack_downlink = gw_pb2.DownlinkFrame()
-                    chirpstack_downlink.ParseFromString(payload)
+                    downlink_frame = gw_pb2.DownlinkFrame()
+                    downlink_frame.ParseFromString(payload)
                     logger.debug(
                         "Downlink message received from Chirpstack",
-                        chirpstack_downlink=lazy_protobuf_fmt(chirpstack_downlink),
+                        chirpstack_downlink=lazy_protobuf_fmt(downlink_frame),
                     )
-                    # NOTE: Chirpstack may return two downlinks, when answering on class A uplink.
-                    #   This downlinks will contain same downlink message with different TMST - for RX1 and RX2 window.
-                    #   Here we are strip second downlink, and send just first one.
-                    # TODO: Better handling for all downlinks from chirpstack
-                    for downlink in self._create_ran_downlinks(chirpstack_downlink)[:1]:
-                        device_ctx = await self._fetch_downlink_device_context(downlink)
-                        if device_ctx is not None:
-                            logger.debug("Downlink message assembled", downlink=repr(downlink))
-                            # Setting device context, required for ran router
-                            downlink.device_ctx = device_ctx
-                            await self._downlinks_from_chirpstack.put(downlink)
-                        else:
-                            logger.warning("Missed device context for downlink", downlink_id=downlink.downlink_id)
+                    await self._process_downlink_frame(downlink_frame)
 
                 except Exception:
                     logger.exception("Unhandled exception in in chirpstack listening loop")

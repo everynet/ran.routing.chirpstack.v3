@@ -45,7 +45,7 @@ Parameters are read from environment variables and/or **settings.cfg** and **.en
 | CHIRPSTACK_API_GRPC_CERT_PATH     |          |                  | If you are using custom certificates for a secure connection, you must specify certificate path here                                                                                                      |
 | CHIRPSTACK_MQTT_SERVER_URI        | Yes      |                  | ChirpStack MQTT server URI e.g. mqtt://my-chirpstack-server.com.  URI support username, password and secure connecton  e.g. mqtts://admin:pass@my-chirpstack-server.com                        |
 | CHIRPSTACK_APPLICATION_ID         | Yes      |                  | ChirpStack application ID that could be found in the UI.                                                                                                                                                                |
-| CHIRPSTACK_MATCH_TAGS             |          | ran-device=yes   | Mark devices (or device profiles) with the "everynet" tag to connect them to Everynet coverage. Here you need to set these tags. e.g. ran-device=yes tag.  |
+| CHIRPSTACK_MATCH_TAGS             |          | everynet=true   | Mark devices (or device profiles) with the "everynet" tag to connect them to Everynet coverage. Here you need to set these tags. e.g. everynet=true tag.  |
 | CHIRPSTACK_GATEWAY_ID             | Yes      | 000000000000C0DE | MAC address of the virtual gateway from which messages will be arriving to the ChripStack                                                                                                                      |
 | CHIRPSTACK_DEVICES_REFRESH_PERIOD |          | 300              | Period in seconds to fetch device list from the ChirpStack and sync it with Everynet RAN |
 | RAN_TOKEN                         | Yes      |                  | RAN Routing API token                                                                                                                                                                                  |
@@ -139,8 +139,4 @@ Please check that you have blocked port 8080 by firewall.
 ## Known limitations
 
 These are the known limitations that are going to be fixed in the next versions of this software:
-
 - neither FSK, nor LR-FHSS modulations are supported
-- Class A devices only are supported by this middleware
-- no multicast groups or FOTA
-- unability to fetch ChirpStack devices by DevAddr creates some problems
