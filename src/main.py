@@ -9,7 +9,6 @@ import structlog
 import uvloop
 from grpc.aio._channel import Channel
 from ran.routing.core import Core as RANCore
-from ran.routing.core import domains as ran_domains
 from ran.routing.core.multicast_groups.exceptions import ApiMulticastGroupAlreadyExistsError
 from ran.routing.core.routing_table.exceptions import ApiDeviceAlreadyExistsError
 
@@ -281,8 +280,8 @@ async def main():
 
     chirpstack_api = chirpstack.ChirpStackAPI(grpc_channel, settings.CHIRPSTACK_API_TOKEN)
 
-    ran_coverage_domain = ran_domains.Coverage[settings.RAN_COVERAGE_DOMAIN.upper()]
-    ran_core = RANCore(access_token=settings.RAN_TOKEN, coverage=ran_coverage_domain)
+    logger.info("Using RAN API url: ", coverage=settings.RAN_API_URL)
+    ran_core = RANCore(access_token=settings.RAN_TOKEN, url=settings.RAN_API_URL)
     await ran_core.connect()
 
     logger.info("Cleanup RAN device list")
