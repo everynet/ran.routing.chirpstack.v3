@@ -33,6 +33,7 @@ from .models import (
     DownlinkResultStatus,
     DownlinkTiming,
     DownstreamRadio,
+    Gps,
     Uplink,
     UplinkAck,
     UplinkRadioParams,
@@ -304,12 +305,19 @@ class RanTrafficRouter:
         total_challenges = len(upstream_message.mic_challenge)
         self._mic_tries_count[uplink_id] = total_challenges
 
+        # gps: Gps | None
+        if upstream_message.gps is not None:
+            gps = Gps(lat=upstream_message.gps.lat, lng=upstream_message.gps.lng, alt=upstream_message.gps.alt)
+        else:
+            gps = None
+
         for mic, lora_message_bytes in self._populate_lora_messages(upstream_message):
             uplink = Uplink(
                 uplink_id=uplink_id,
                 used_mic=mic,
                 payload=pylorawan.message.PHYPayload.parse(lora_message_bytes),
                 radio=UplinkRadioParams.parse_obj(upstream_message.radio),
+                gps=gps,
             )
             await self._uplinks_from_ran.put(uplink)
 

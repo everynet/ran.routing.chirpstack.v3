@@ -35,16 +35,33 @@ def pytest_configure(config):
     if config.pluginmanager.getplugin("asyncio"):
         config.option.asyncio_mode = "auto"
     config.addinivalue_line("markers", "integration: mark test as integration to run")
+    config.addinivalue_line("markers", "upstream: mark test as integration/upstream.")
+    config.addinivalue_line("markers", "downstream: mark test as integration/downstream.")
+    config.addinivalue_line("markers", "multicast: mark test as integration/multicast.")
 
 
 def pytest_addoption(parser):
-    parser.addoption("--integration", action="store_true", default=False, help="run integration tests")
+    parser.addoption("--integration", action="store_true", default=False, help="Run integration tests")
+    parser.addoption("--no-upstream", action="store_true", default=False, help="Disable upstream tests")
+    parser.addoption("--no-downstream", action="store_true", default=False, help="Disable downstream tests")
+    parser.addoption("--no-multicast", action="store_true", default=False, help="Disable multicast tests")
+    # Configure region for integration tests
+    parser.addoption("--region", action="store", default="eu868", help="Region, used for testing")
 
 
 def pytest_collection_modifyitems(config, items):
     if config.getoption("--integration"):
         # --integration given in cli: do not skip integration tests
+
+        for skip_tests_part in ("upstream", "downstream", "multicast"):
+            if config.getoption(f"--no-{skip_tests_part}"):
+                skip_flag = pytest.mark.skip(reason=f"Skipped because of '--no-{skip_tests_part}' flag")
+                for item in items:
+                    if skip_tests_part in item.keywords:
+                        item.add_marker(skip_flag)
+
         return
+
     skip_integration = pytest.mark.skip(reason="need '--integration' flag to run")
     for item in items:
         if "integration" in item.keywords:

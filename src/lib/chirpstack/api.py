@@ -134,7 +134,7 @@ class ChirpStackAPI:
             yield device
 
     @suppress_rpc_error([grpc.StatusCode.NOT_FOUND, grpc.StatusCode.UNAUTHENTICATED])
-    async def get_device_keys(self, dev_eui: str):
+    async def get_device_keys(self, dev_eui: str) -> api.GetDeviceKeysResponse:
         client = api.DeviceServiceStub(self._channel)
 
         req = api.DeviceKeys()
@@ -144,7 +144,7 @@ class ChirpStackAPI:
         return res.device_keys
 
     @suppress_rpc_error([grpc.StatusCode.NOT_FOUND, grpc.StatusCode.UNAUTHENTICATED])
-    async def get_device_activation(self, dev_eui: str) -> device_pb2.DeviceActivation:
+    async def get_device_activation(self, dev_eui: str) -> device_pb2.GetDeviceActivationResponse:
         client = api.DeviceServiceStub(self._channel)
 
         req = api.DeviceActivation()
@@ -177,7 +177,9 @@ class ChirpStackAPI:
         res = await client.Get(req, metadata=self._auth_token)
         return res.device_profile
 
-    async def get_network_servers(self, organization_id: Optional[int] = None, batch_size: int = 20):
+    async def get_network_servers(
+        self, organization_id: Optional[int] = None, batch_size: int = 20
+    ) -> AsyncIterator[api.NetworkServerListItem]:
         client = api.NetworkServerServiceStub(self._channel)
 
         req = api.ListNetworkServerRequest()
@@ -210,7 +212,37 @@ class ChirpStackAPI:
         response = await client.Create(req, metadata=self._auth_token)
         return response.id
 
-    async def get_applications(self, organization_id: int, batch_size=20):
+    async def has_global_api_token(self) -> bool:
+        try:
+            [_ async for _ in self.get_organizations()]
+        except grpc.aio.AioRpcError as e:
+            if e.code() == grpc.StatusCode.UNAUTHENTICATED:
+                return False
+            else:
+                raise
+        else:
+            return True
+
+    async def get_organizations(self, batch_size: int = 20) -> AsyncIterator[api.OrganizationListItem]:
+        client = api.OrganizationServiceStub(self._channel)
+        
+        req = api.ListOrganizationRequest()
+        req.limit = batch_size
+        req.offset = 0
+
+        async for org in self._get_paginated_data(req, client.List, batch_size):
+            yield org
+
+    @suppress_rpc_error([grpc.StatusCode.NOT_FOUND, grpc.StatusCode.UNAUTHENTICATED])
+    async def get_organization(self, org_id: int) -> api.Organization:
+        client = api.OrganizationServiceStub(self._channel)
+
+        req = api.GetOrganizationRequest()
+        req.id = org_id
+        
+        return (await client.Get(req, metadata=self._auth_token)).organization
+
+    async def get_applications(self, organization_id: int, batch_size=20) -> AsyncIterator[api.ApplicationListItem]:
         client = api.ApplicationServiceStub(self._channel)
 
         req = api.ListApplicationRequest()
@@ -301,7 +333,16 @@ class ChirpStackAPI:
         return await client.Create(req, metadata=self._auth_token)
 
     @suppress_rpc_error([grpc.StatusCode.NOT_FOUND, grpc.StatusCode.UNAUTHENTICATED])
-    async def get_gateway(self, gateway_id):
+    async def delete_gateway(self, gateway_id):
+        client = api.GatewayServiceStub(self._channel)
+
+        req = api.DeleteServiceProfileRequest()
+        req.id = gateway_id
+
+        return await client.Delete(req, metadata=self._auth_token)
+
+    @suppress_rpc_error([grpc.StatusCode.NOT_FOUND, grpc.StatusCode.UNAUTHENTICATED])
+    async def get_gateway(self, gateway_id) -> api.GetGatewayResponse:
         client = api.GatewayServiceStub(self._channel)
 
         req = api.GetGatewayRequest()
@@ -314,7 +355,7 @@ class ChirpStackAPI:
         application_id: int,
         organization_id: Optional[int] = None,
         batch_size: int = 20,
-    ):
+    ) -> AsyncIterator[api.MulticastGroupListItem]:
         client = api.MulticastGroupServiceStub(self._channel)
         req = api.ListMulticastGroupRequest()
 
@@ -328,7 +369,8 @@ class ChirpStackAPI:
         async for multicast_group in self._get_paginated_data(req, client.List, batch_size):
             yield multicast_group
 
-    async def get_multicast_group(self, group_id: str):  # group_id is str formatted UUID
+    # NOTE: group_id is str formatted UUID
+    async def get_multicast_group(self, group_id: str) -> api.GetMulticastGroupResponse:
         client = api.MulticastGroupServiceStub(self._channel)
         req = api.GetMulticastGroupRequest()
 

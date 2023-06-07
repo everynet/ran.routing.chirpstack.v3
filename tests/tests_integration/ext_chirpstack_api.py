@@ -218,14 +218,6 @@ class ChirpStackExtendedApi(ChirpStackAPI):
 
         return await client.Delete(req, metadata=self._auth_token)
 
-    async def delete_gateway(self, gateway_id):
-        client = api.GatewayServiceStub(self._channel)
-
-        req = api.DeleteServiceProfileRequest()
-        req.id = gateway_id
-
-        return await client.Delete(req, metadata=self._auth_token)
-
     async def stream_frame_logs(self, dev_eui, timeout=None):
         client = api.DeviceServiceStub(self._channel)
 
@@ -251,3 +243,49 @@ class ChirpStackExtendedApi(ChirpStackAPI):
         while True:
             message = await asyncio.wait_for(event_logs_iter.__anext__(), timeout=timeout)
             yield message
+
+    async def enqueue_downlink(self, dev_eui, data: bytes, confirmed: bool = False, f_port: int = 2):
+        client = api.DeviceQueueServiceStub(self._channel)
+
+        req = api.EnqueueDeviceQueueItemRequest()
+        req.device_queue_item.confirmed = confirmed
+        req.device_queue_item.data = data
+        req.device_queue_item.dev_eui = dev_eui
+        req.device_queue_item.f_port = f_port
+
+        return await client.Enqueue(req, metadata=self._auth_token)
+
+    async def create_multicast_group(self, **kwargs) -> str:
+        client = api.MulticastGroupServiceStub(self._channel)
+
+        mc = api.MulticastGroup()
+        mc.name = kwargs["name"]
+        mc.application_id = kwargs["application_id"]
+        mc.mc_addr = kwargs["mc_addr"]
+        mc.mc_nwk_s_key = kwargs["mc_nwk_s_key"]
+        mc.mc_app_s_key = kwargs["mc_app_s_key"]
+        mc.f_cnt = kwargs.get("f_cnt", 0)
+        mc.group_type = api.MulticastGroupType.Value(kwargs["group_type"])
+        mc.dr = kwargs.get("dr", 0)
+        mc.frequency = kwargs["frequency"]
+
+        req = api.CreateMulticastGroupRequest()
+        req.multicast_group.MergeFrom(mc)
+        response = await client.Create(req, metadata=self._auth_token)
+        return response.id
+
+    async def add_device_to_multicast_group(self, group_id: str, dev_eui: str):
+        client = api.MulticastGroupServiceStub(self._channel)
+
+        req = api.AddDeviceToMulticastGroupRequest()
+        req.multicast_group_id = group_id
+        req.dev_eui = dev_eui
+
+        return await client.AddDevice(req, metadata=self._auth_token)
+
+    async def delete_multicast_group(self, group_id: str):
+        client = api.MulticastGroupServiceStub(self._channel)
+        req = api.DeleteMulticastGroupRequest()
+        req.id = group_id
+
+        return await client.Delete(req, metadata=self._auth_token)

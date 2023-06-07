@@ -61,9 +61,14 @@ class ChirpstackTrafficRouter:
         radio_params = uplink.radio
 
         location = common_pb2.Location()
-        location.latitude = 0.0
-        location.longitude = 0.0
-        location.altitude = 0.0
+        if uplink.gps:
+            location.latitude = uplink.gps.lat
+            location.longitude = uplink.gps.lng
+            location.altitude = uplink.gps.alt if uplink.gps.alt is not None else 0.0
+        else:
+            location.latitude = 0.0
+            location.longitude = 0.0
+            location.altitude = 0.0
 
         rx_info = gw_pb2.UplinkRXInfo()
         rx_info.gateway_id = bytes.fromhex(self.gateway_mac)
@@ -265,13 +270,23 @@ class ChirpstackTrafficRouter:
             # If this is join - we need to force update device's new addr in local storage
             await device.sync_from_remote(trigger_update_callback=False, update_local_list=True)
             logger.debug("Device list synced for newly joined device", dev_eui=device.dev_eui, new_addr=device.dev_addr)
-            logger.debug("Device context obtained from cache (JoinAccept)", context_id=downlink.context_id)
+            logger.debug(
+                "Device context obtained from cache (JoinAccept)",
+                context_id=downlink.context_id,
+                dev_eui=device.dev_eui,
+                dev_addr=device.dev_addr,
+            )
             return DownlinkDeviceContext.Regular(dev_eui=device.dev_eui, target_dev_addr=device.dev_addr)
 
         # If this is not JoinAccept - it can be class A downlink, so we using device from cache.
         if device is not None:
             self._chirpstack_context_to_device.pop(downlink.context_id)
-            logger.debug("Device context obtained from cache (answering to uplink)", context_id=downlink.context_id)
+            logger.debug(
+                "Device context obtained from cache (answering to uplink)",
+                context_id=downlink.context_id,
+                dev_eui=device.dev_eui,
+                dev_addr=device.dev_addr,
+            )
             return DownlinkDeviceContext.Regular(dev_eui=device.dev_eui)
 
         # We can handle only ConfirmedDataDown/UnconfirmedDataDown downlinks
@@ -290,7 +305,11 @@ class ChirpstackTrafficRouter:
 
         # If device found in devices list, we are currently processing B/C downlink. Device's DevEui found.
         if device is not None:
-            logger.debug("Device context obtained (class B/C downlink)", dev_addr=str_dev_addr)
+            logger.debug(
+                "Device context obtained (class B/C downlink)",
+                dev_addr=str_dev_addr,
+                dev_eui=device.dev_eui,
+            )
             return DownlinkDeviceContext.Regular(dev_eui=device.dev_eui)
         logger.debug("Could not obtain device context for device, looking in multicast groups", dev_addr=str_dev_addr)
 

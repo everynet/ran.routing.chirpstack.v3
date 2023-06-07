@@ -1,24 +1,26 @@
 import asyncio
-from contextlib import suppress
 import signal
+import sys
 import uuid
-from typing import Dict, Optional
+from contextlib import suppress
+from typing import Optional
 
 import grpc
 import structlog
 import uvloop
 from grpc.aio._channel import Channel
 from ran.routing.core import Core as RANCore
-from ran.routing.core.multicast_groups.exceptions import ApiMulticastGroupAlreadyExistsError
-from ran.routing.core.routing_table.exceptions import ApiDeviceAlreadyExistsError
 
 import settings
 from lib import chirpstack, healthcheck, mqtt
 from lib.logging_conf import configure_logging
+from lib.ran_hooks import RanDevicesSyncHook, RanMulticastGroupsSyncHook
 from lib.traffic.chirpstack import ChirpstackTrafficRouter
 from lib.traffic.manager import TrafficManager
 from lib.traffic.ran import RanTrafficRouter
 from lib.utils import Periodic
+
+STOP_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
 
 logger = structlog.getLogger(__name__)
 
@@ -52,203 +54,6 @@ def get_tags(value: str) -> dict:
     return {parts[0]: ""}
 
 
-class RanSyncDevices(chirpstack.MultiApplicationDeviceList):
-    def __init__(
-        self,
-        ran_core: RANCore,
-        chirpstack_api: chirpstack.ChirpStackAPI,
-        tags: Optional[Dict[str, str]] = None,
-    ) -> None:
-        self.ran_core = ran_core
-        super().__init__(chirpstack_api, tags)
-
-    async def on_device_add(self, device: chirpstack.Device) -> None:
-        try:
-            dev_eui = int(device.dev_eui, 16)
-            dev_addr = None
-            if device.dev_addr:
-                dev_addr = int(device.dev_addr, 16)
-            logger.info("Adding device", dev_eui=device.dev_eui, dev_addr=dev_addr)
-            await self.ran_core.routing_table.insert(dev_eui=dev_eui, join_eui=dev_eui, dev_addr=dev_addr)
-
-        except ApiDeviceAlreadyExistsError:
-            logger.warning("Device already exists. Attempting to update device.", dev_eui=device.dev_eui)
-            # Resync device. Fetch data from remote and use it as old device in sync.
-            ran_device = (await self.ran_core.routing_table.select([int(device.dev_eui, 16)]))[0]
-            old_device = chirpstack.Device(
-                _devices=self,
-                dev_eui=device.dev_eui,
-                dev_addr=f"{ran_device.active_dev_addr:08x}" if ran_device.active_dev_addr is not None else None,
-            )
-            await self.on_device_updated(old_device, device)
-
-    async def on_device_remove(self, device: chirpstack.Device) -> None:
-        logger.info("Removing device", dev_eui=device.dev_eui)
-        dev_eui = int(device.dev_eui, 16)
-        await self.ran_core.routing_table.delete([dev_eui])
-
-    async def on_device_updated(self, old_device: chirpstack.Device, new_device: chirpstack.Device) -> None:
-        if old_device == new_device:
-            logger.info("Device already synced", dev_eui=new_device.dev_eui)
-        # if old_device.dev_eui != new_device.dev_eui:
-        #     logger.info("Device dev_eui changed, recreating device", old=old_device.dev_eui, new=new_device.dev_eui)
-        #     old_dev_eui = int(old_device.dev_eui, 16)
-        #     new_dev_eui = int(new_device.dev_eui, 16)
-        #     new_dev_addr = None
-        #     if new_device.dev_addr:
-        #         new_dev_addr = int(new_device.dev_addr, 16)
-
-        #     await self.ran_core.routing_table.delete([old_dev_eui])
-        #     await self.ran_core.routing_table.insert(dev_eui=new_dev_eui, join_eui=new_dev_eui, dev_addr=new_dev_addr)
-        #     # If we are recreating device, we also set new dev_addr, so we don't want to update it again.
-        #     old_device.dev_addr = new_device.dev_addr
-
-        if old_device.dev_addr != new_device.dev_addr:
-            dev_eui = int(new_device.dev_eui, 16)
-            dev_addr = None
-            if new_device.dev_addr:
-                dev_addr = int(new_device.dev_addr, 16)
-
-            if dev_addr is None:
-                logger.info("No new dev_addr specified for device", dev_eui=dev_eui)
-                return
-
-            logger.info(
-                "Updating device's dev_addr",
-                dev_eui=new_device.dev_eui,
-                old_dev_addr=old_device.dev_addr,
-                new_dev_addr=new_device.dev_addr,
-            )
-            # TODO: better update sequence
-            await self.ran_core.routing_table.update(dev_eui=dev_eui, join_eui=dev_eui, active_dev_addr=dev_addr)
-            # await self.ran_core.routing_table.delete([dev_eui])
-            # await self.ran_core.routing_table.insert(dev_eui=dev_eui, join_eui=dev_eui, dev_addr=dev_addr)
-            logger.info("Device dev_addr synced", dev_eui=new_device.dev_eui)
-
-
-class RanSyncMulticastGroups(chirpstack.MultiApplicationMulticastGroupList):
-    def __init__(
-        self,
-        ran_core: RANCore,
-        chirpstack_api: chirpstack.ChirpStackAPI,
-    ) -> None:
-        self.ran_core: RANCore = ran_core
-        super().__init__(chirpstack_api)
-
-    async def on_group_add(self, group: chirpstack.MulticastGroup) -> None:
-        if not group.addr:
-            logger.warning(
-                "Multicast group not synced with ran, because it has no assigned 'Addr'",
-                group_id=group.id,
-            )
-            return
-
-        group_addr = int(group.addr, 16)
-        try:
-            await self.ran_core.multicast_groups.create_multicast_group(name=group.name, addr=group_addr)
-            logger.info("Multicast group added", addr=group.addr, name=group.name)
-        except ApiMulticastGroupAlreadyExistsError:
-            logger.warning("Multicast group already exists. Attempting to sync multicast group.", addr=group.addr)
-            # If group already exists, fetch data from remote and perform update, assuming something was changed
-            ran_group = (await self.ran_core.multicast_groups.get_multicast_groups(int(group.addr, 16)))[0]
-            old_group = chirpstack.MulticastGroup(
-                _groups=self,
-                id=group.id,
-                addr=group.addr,
-                name=ran_group.name,
-                devices=set(f"{d:016x}" for d in ran_group.devices),
-            )
-            return await self.on_group_updated(old_group=old_group, new_group=group)
-
-        existed_devices = await self.ran_core.routing_table.select(
-            dev_euis=list(int(dev_eui, 16) for dev_eui in group.devices)
-        )
-        existed_dev_euis = set(f"{device.dev_eui:016x}" for device in existed_devices)
-        for device_eui in group.devices:
-            if device_eui not in existed_dev_euis:
-                logger.warning(
-                    "Device was not added to multicast group, because it not present in routing table",
-                    addr=group.addr,
-                    dev_eui=device_eui,
-                )
-                continue
-            await self.ran_core.multicast_groups.add_device_to_multicast_group(
-                addr=group_addr, dev_eui=int(device_eui, 16)
-            )
-            logger.info("Device added to multicast group", addr=group.addr, dev_eui=device_eui)
-
-        logger.info("Multicast group synced", addr=group.addr)
-
-    async def on_group_remove(self, group: chirpstack.MulticastGroup) -> None:
-        if not group.addr:
-            logger.warning(
-                f"Multicast group with id {group.id!r} not synced with ran, because no dev_addr assigned to it"
-            )
-            return
-
-        group_addr = int(group.addr, 16)
-        await self.ran_core.multicast_groups.delete_multicast_groups([group_addr])
-        logger.info("Multicast group removed", addr=group.addr, name=group.name)
-
-    async def on_group_updated(
-        self, old_group: chirpstack.MulticastGroup, new_group: chirpstack.MulticastGroup
-    ) -> None:
-        if old_group == new_group:
-            logger.info("Multicast group already in sync", addr=new_group.addr)
-            return
-
-        if old_group.addr != new_group.addr or old_group.name != new_group.name:
-            if old_group.addr != new_group.addr:
-                logger.info(
-                    f"Updating multicast group addr: {old_group.addr!r} -> {new_group.addr!r}",
-                    old_addr=old_group.addr,
-                    new_addr=new_group.addr,
-                )
-            if old_group.name != new_group.name:
-                logger.info(
-                    f"Updating multicast group name: {old_group.name!r} -> {new_group.name!r}",
-                    addr=new_group.addr,
-                    old_name=old_group.name,
-                    new_name=new_group.name,
-                )
-
-            old_group_addr = int(old_group.addr, 16)  # type: ignore
-            new_group_addr = int(new_group.addr, 16)  # type: ignore
-            new_name = new_group.name
-            await self.ran_core.multicast_groups.update_multicast_group(
-                addr=old_group_addr, new_addr=new_group_addr, new_name=new_name
-            )
-            logger.info("Multicast group updated", addr=new_group.addr)
-
-        if old_group.devices != new_group.devices:
-            for dev_to_remove in old_group.devices - new_group.devices:
-                device_removed = await self.ran_core.multicast_groups.remove_device_from_multicast_group(
-                    addr=int(new_group.addr, 16), dev_eui=int(dev_to_remove, 16)  # type: ignore
-                )
-                if device_removed:
-                    logger.info("Device removed from multicast group", addr=new_group.addr, dev_eui=dev_to_remove)
-
-            devices_to_add = new_group.devices - old_group.devices
-            if len(devices_to_add) > 0:
-                existed_devices = await self.ran_core.routing_table.select(
-                    dev_euis=list(int(dev_eui, 16) for dev_eui in devices_to_add)
-                )
-                existed_dev_euis = set(f"{device.dev_eui:016x}" for device in existed_devices)
-                for dev_eui_to_add in devices_to_add:
-                    if dev_eui_to_add not in existed_dev_euis:
-                        logger.warning(
-                            "Device was not added to multicast group, because it not present in routing table",
-                            addr=new_group.addr,
-                            dev_eui=dev_eui_to_add,
-                        )
-                        continue
-                    await self.ran_core.multicast_groups.add_device_to_multicast_group(
-                        addr=int(new_group.addr, 16), dev_eui=int(dev_eui_to_add, 16)  # type: ignore
-                    )
-                    logger.info("Device added to multicast group", addr=new_group.addr, dev_eui=dev_eui_to_add)
-            logger.info("Multicast group devices synced", addr=new_group.addr)
-
-
 async def get_gateway(chirpstack_api: chirpstack.ChirpStackAPI, gateway_id: str):
     gateway = await chirpstack_api.get_gateway(gateway_id)
     if not gateway:
@@ -257,16 +62,49 @@ async def get_gateway(chirpstack_api: chirpstack.ChirpStackAPI, gateway_id: str)
     return gateway.gateway
 
 
-async def healthcheck_live(context):
-    pass
+async def main(loop):
+    configure_logging(log_level=settings.LOG_LEVEL, console_colors=settings.LOG_COLORS)
 
+    # Global stop event to stop 'em all!
+    stop_event = asyncio.Event()
 
-async def healthcheck_ready(context):
-    pass
+    # Event to signal when service is ready
+    service_ready = asyncio.Event()
 
+    async def healthcheck_live(context):
+        if stop_event.is_set():
+            return False
+        return True
 
-async def main():
-    configure_logging(log_level=settings.LOG_LEVEL, console_colors=True)
+    async def healthcheck_ready(context):
+        if service_ready.is_set():
+            return True
+        return False
+
+    # App termination handler
+    def stop_all() -> None:
+        stop_event.set()
+        logger.warning("Shutting down service! Press ^C again to terminate")
+
+        def terminate():
+            sys.exit("\nTerminated!\n")
+
+        for sig in STOP_SIGNALS:
+            loop.remove_signal_handler(sig)
+            loop.add_signal_handler(sig, terminate)
+
+    for sig in STOP_SIGNALS:
+        loop.add_signal_handler(sig, stop_all)
+
+    healthcheck_server = healthcheck.HealthcheckServer(healthcheck_live, healthcheck_ready, context=None)
+    tasks = set()
+    tasks.add(
+        asyncio.create_task(
+            healthcheck_server.run(stop_event, settings.HEALTHCHECK_SERVER_HOST, settings.HEALTHCHECK_SERVER_PORT),
+            name="health_check",
+        )
+    )
+    logger.info("HealthCheck server task created", task_name="health_check")
 
     grpc_channel = get_grpc_channel(
         settings.CHIRPSTACK_API_GRPC_HOST,
@@ -284,6 +122,63 @@ async def main():
     ran_core = RANCore(access_token=settings.RAN_TOKEN, url=settings.RAN_API_URL)
     await ran_core.connect()
 
+    logger.info("Performing initial ChirpStack devices list sync")
+
+    ran_devices_sync_hook = RanDevicesSyncHook(ran_core=ran_core)
+    ran_multicast_groups_sync_hook = RanMulticastGroupsSyncHook(ran_core=ran_core)
+
+    if settings.CHIRPSTACK_ORGANIZATION_ID == 0:
+        if not await chirpstack_api.has_global_api_token():
+            logger.error("Invalid api token type")
+            print(
+                "\nCHIRPSTACK_API_TOKEN you use has lack of 'list organizations' permissions. "
+                "This error can happen if you are trying to use organization token for multi-organization mode."
+                "\n  - If you want to use ran-bridge for multiple organizations, specify global api key as "
+                "CHIRPSTACK_API_TOKEN."
+                "\n  - If you want to use ran-bridge for specific organizations with this api key, specify "
+                "CHIRPSTACK_ORGANIZATION_ID.\n",
+                flush=True,
+            )
+            await ran_core.close()
+            return
+
+        logger.warning(
+            "CHIRPSTACK_ORGANIZATION_ID is set to 0. Starting in multi-organization mode",
+            handling_organizations=[org.name async for org in chirpstack_api.get_organizations()],
+        )
+        ran_chirpstack_devices = chirpstack.MultiOrgDeviceList(
+            chirpstack_api=chirpstack_api,
+            tags=tags,
+            update_hook=ran_devices_sync_hook,
+        )
+        ran_chirpstack_multicast_groups = chirpstack.MultiOrgMulticastGroupList(
+            chirpstack_api=chirpstack_api,
+            update_hook=ran_multicast_groups_sync_hook,
+        )
+    else:
+        chirpstack_org = await chirpstack_api.get_organization(org_id=settings.CHIRPSTACK_ORGANIZATION_ID)
+        if chirpstack_org is None:
+            logger.error(
+                "ChirpStack organization with this id not found."
+                "Ensure you provide correct CHIRPSTACK_ORGANIZATION_ID.",
+                org_id=settings.CHIRPSTACK_ORGANIZATION_ID
+            )
+            await ran_core.close()
+            return
+
+        logger.warning("Starting in single-organization mode", handling_org=[chirpstack_org.name])
+        ran_chirpstack_devices = chirpstack.MultiApplicationDeviceList(
+            chirpstack_api=chirpstack_api,
+            tags=tags,
+            org_id=settings.CHIRPSTACK_ORGANIZATION_ID,
+            update_hook=ran_devices_sync_hook,
+        )
+        ran_chirpstack_multicast_groups = chirpstack.MultiApplicationMulticastGroupList(
+            chirpstack_api=chirpstack_api,
+            org_id=settings.CHIRPSTACK_ORGANIZATION_ID,
+            update_hook=ran_multicast_groups_sync_hook,
+        )
+        
     logger.info("Cleanup RAN device list")
     await ran_core.routing_table.delete_all()
     logger.info("Cleanup done")
@@ -294,27 +189,13 @@ async def main():
     logger.info("Cleanup done")
 
     logger.info("Performing initial ChirpStack devices list sync")
-    ran_chirpstack_devices = RanSyncDevices(ran_core, chirpstack_api, tags)
     await ran_chirpstack_devices.sync_from_remote()
     logger.info("Devices synced")
 
     logger.info("Performing initial ChirpStack multicast groups list sync")
-    ran_chirpstack_multicast_groups = RanSyncMulticastGroups(ran_core, chirpstack_api)
     await ran_chirpstack_multicast_groups.sync_from_remote()
     logger.info("Multicast groups synced")
 
-    # Global stop event to stop 'em all!
-    stop_event = asyncio.Event()
-
-    def stop_all() -> None:
-        stop_event.set()
-        logger.warning("Shutting down service!")
-
-    loop.add_signal_handler(signal.SIGHUP, stop_all)
-    loop.add_signal_handler(signal.SIGINT, stop_all)
-    loop.add_signal_handler(signal.SIGTERM, stop_all)
-
-    tasks = set()
     tasks.add(
         Periodic(ran_chirpstack_devices.sync_from_remote).create_task(
             stop_event,
@@ -335,7 +216,7 @@ async def main():
 
     chirpstack_mqtt_client = mqtt.MQTTClient(settings.CHIRPSTACK_MQTT_SERVER_URI, client_id=uuid.uuid4().hex)
     tasks.add(asyncio.create_task(chirpstack_mqtt_client.run(stop_event), name="chirpstack_mqtt_client"))
-    logger.info("MQTT client started", task_name="chirpstack_mqtt_client")
+    logger.info("MQTT client task started", task_name="chirpstack_mqtt_client")
 
     gateway = await get_gateway(chirpstack_api, settings.CHIRPSTACK_GATEWAY_ID)
     logger.info("Using gateway mac", mac=gateway.id)
@@ -357,18 +238,12 @@ async def main():
     tasks.add(asyncio.create_task(manager.run(stop_event), name="traffic_manager"))
     logger.info("TrafficManager started", task_name="traffic_manager")
 
-    healthcheck_server = healthcheck.HealthcheckServer(healthcheck_live, healthcheck_ready, None)
-    tasks.add(
-        asyncio.create_task(
-            healthcheck_server.run(stop_event, settings.HEALTHCHECK_SERVER_HOST, settings.HEALTHCHECK_SERVER_PORT),
-            name="health_check",
-        )
-    )
-    logger.info("HealthCheck server started", task_name="health_check")
-
     tasks.add(asyncio.create_task(stop_event.wait(), name="stop_event_wait"))
 
+    service_ready.set()
     finished, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    service_ready.clear()
+
     finished_task = finished.pop()
     logger.warning(f"Task {finished_task.get_name()!r} exited, shutting down gracefully")
 
@@ -394,5 +269,9 @@ async def main():
 
 
 if __name__ == "__main__":
-    loop = uvloop.new_event_loop()
-    loop.run_until_complete(main())
+    if sys.version_info >= (3, 11):
+        with asyncio.Runner(loop_factory=uvloop.new_event_loop) as runner:
+            runner.run(main(runner.get_loop()))
+    else:
+        event_loop = uvloop.new_event_loop()
+        event_loop.run_until_complete(main(event_loop))

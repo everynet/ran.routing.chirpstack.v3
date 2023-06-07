@@ -1,7 +1,6 @@
 import asyncio
-from collections import defaultdict
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
-from typing import Any, AsyncGenerator, Callable, List, Optional, Set, Tuple, Union
+from typing import Any, AsyncGenerator, Optional, Tuple, Union
 from urllib.parse import unquote, urlparse
 
 import structlog
@@ -22,15 +21,46 @@ class MQTTClient:
         self._uri = uri
         self._client_options = client_options
         self._client: AsyncioClient = None  # type: ignore
-        self._create_client()
 
         self._reconnect_interval = 1
         self._connection_established = asyncio.Event()
+        self._connection_failed = asyncio.Event()
+        self._exception: Exception | None = None
 
         self._listeners = MQTTMatcher()
 
-    async def wait_for_connection(self, timeout=None):
-        await asyncio.wait_for(self._connection_established.wait(), timeout)
+        self._create_client()
+
+    async def wait_for_connection(self, timeout=None) -> bool:
+        try:
+            _, pending = await asyncio.wait_for(
+                asyncio.wait(
+                    {
+                        asyncio.create_task(self._connection_established.wait()),
+                        asyncio.create_task(self._connection_failed.wait()),
+                    },
+                    return_when=asyncio.FIRST_COMPLETED,
+                ),
+                timeout,
+            )
+
+            # If listener stopped then cancel waiter and raise exception
+            pending_task = pending.pop()
+            pending_task.cancel()
+
+            # Waiting until task cancelled
+            try:
+                await pending_task
+            except asyncio.CancelledError:
+                pass
+
+        except asyncio.TimeoutError:
+            return False
+
+        if self._exception:
+            raise Exception("MQTT connection not established") from self._exception
+
+        return True
 
     def _get_mqtt_default_port(self, scheme: str) -> int:
         if scheme == "ws":
@@ -74,6 +104,9 @@ class MQTTClient:
 
             client._client.ws_set_options(path=ws_path)
 
+        self._connection_established.clear()
+        self._connection_failed.clear()
+        self._exception = None
         self._client = client
 
     async def publish(
@@ -125,8 +158,16 @@ class MQTTClient:
 
         async def disconnect_on_stop():
             await stop_event.wait()
+            if not self._connection_established.is_set():
+                return
             logger.debug("Stop signal received, closing MQTT client")
-            await self._client.disconnect()
+            try:
+                await self._client.disconnect()
+                logger.debug("MQTT client disconnected normally")
+            except MqttError as err:
+                logger.debug("MQTT client abnormal disconnect", error=err)
+            finally:
+                return None
 
         disconnect_task = asyncio.create_task(disconnect_on_stop())
 
@@ -134,23 +175,27 @@ class MQTTClient:
             try:
                 await self._subscribe_worker()
             except MqttError as err:
+                self._connection_established.clear()
+                self._connection_failed.set()
+                self._exception = err
+
+                # Also breaking here, because "_subscribe_worker" may block execution forever until error.
                 if stop_event.is_set():
-                    await disconnect_task
-                    return
+                    break
 
                 self._reconnect_interval = min(self._reconnect_interval * 2, 900)
-                logger.error(
-                    "MQTT error. Reconnecting...",
-                    error=err,
-                    reconnect_interval=self._reconnect_interval,
-                )
-                self._connection_established.clear()
+                logger.error("MQTT error", error=err)
                 await self.on_disconnect()
 
+                logger.warning("Next MQTT client reconnect attempt scheduled", after=self._reconnect_interval)
                 with suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(stop_event.wait(), timeout=self._reconnect_interval)
 
+                logger.warning("Reconnecting to MQTT...")
                 self._create_client()  # reset connect/reconnect futures
+
+        await disconnect_task
+        logger.debug("MQTT main loop exited")
 
     async def _subscribe_worker(self) -> None:
         """Connect and manage receive tasks."""
