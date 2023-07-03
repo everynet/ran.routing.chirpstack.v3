@@ -332,6 +332,9 @@ async def chirpstack_router(chirpstack_api: ChirpStackExtendedApi, mqtt_client: 
     chirpstack_router = ChirpstackTrafficRouter(
         gateway_mac=gw_id,
         chirpstack_mqtt_client=mqtt_client,
+        chirpstack_uplink_topic_template="gateway/{}/event/up",
+        chirpstack_downlink_topic_template="gateway/{}/command/down",
+        chirpstack_downlink_ack_topic_template="gateway/{}/command/down",
         devices=devices,
         multicast_groups=multicast_groups,
     )

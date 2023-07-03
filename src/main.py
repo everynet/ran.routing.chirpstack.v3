@@ -224,6 +224,9 @@ async def main(loop):
     chirpstack_router = ChirpstackTrafficRouter(
         gateway.id,
         chirpstack_mqtt_client,
+        settings.CHIRPSTACK_UPLINK_TOPIC_TEMPLATE,
+        settings.CHIRPSTACK_DOWNLINK_TOPIC_TEMPLATE,
+        settings.CHIRPSTACK_DOWNLINK_ACK_TOPIC_TEMPLATE,
         devices=ran_chirpstack_devices,
         multicast_groups=ran_chirpstack_multicast_groups,
     )
