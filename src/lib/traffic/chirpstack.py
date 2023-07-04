@@ -34,12 +34,18 @@ class ChirpstackTrafficRouter:
         self,
         gateway_mac: str,
         chirpstack_mqtt_client: mqtt.MQTTClient,
+        chirpstack_uplink_topic_template: str,
+        chirpstack_downlink_topic_template: str,
+        chirpstack_downlink_ack_topic_template: str,
         devices: chirpstack.DeviceList,
         multicast_groups: chirpstack.MulticastGroupList,
     ):
         self.gateway_mac = gateway_mac
         self.devices = devices
         self.chirpstack_mqtt_client = chirpstack_mqtt_client
+        self.chirpstack_uplink_topic_template = chirpstack_uplink_topic_template
+        self.chirpstack_downlink_topic_template = chirpstack_downlink_topic_template
+        self.chirpstack_downlink_ack_topic_template = chirpstack_downlink_ack_topic_template
         self.multicast_groups = multicast_groups
 
         # Track devices, who send uplinks
@@ -155,7 +161,7 @@ class ChirpstackTrafficRouter:
 
     async def _send_uplink_to_chirpstack(self, uplink: Uplink):
         chirpstack_uplink = self._create_chirpstack_uplink(uplink)
-        chirpstack_uplink_topic = "gateway/{}/event/up".format(self.gateway_mac)
+        chirpstack_uplink_topic = self.chirpstack_uplink_topic_template.format(self.gateway_mac)
         await self.chirpstack_mqtt_client.publish(chirpstack_uplink_topic, chirpstack_uplink.SerializeToString())
         logger.debug("Uplink message forwarded to chirpstack", chirpstack_uplink=lazy_protobuf_fmt(chirpstack_uplink))
 
@@ -228,7 +234,7 @@ class ChirpstackTrafficRouter:
             item = gw_pb2.DownlinkTXAckItem(status=ack_status)
             downlink_tx_ack.items.append(item)
 
-        chirpstack_downlink_ack_topic = "gateway/{}/event/ack".format(self.gateway_mac)
+        chirpstack_downlink_ack_topic = self.chirpstack_downlink_ack_topic_template.format(self.gateway_mac)
         await self.chirpstack_mqtt_client.publish(chirpstack_downlink_ack_topic, downlink_tx_ack.SerializeToString())
         logger.debug("DownlinkTXAck forwarded to chirpstack", chirpstack_tx_ack=lazy_protobuf_fmt(downlink_tx_ack))
 
@@ -349,7 +355,7 @@ class ChirpstackTrafficRouter:
                 logger.warning("Missed device context for downlink", downlink_id=downlink.downlink_id)
 
     async def run(self, stop_event: asyncio.Event):
-        chirpstack_downlink_topic = "gateway/{}/command/down".format(self.gateway_mac)
+        chirpstack_downlink_topic = self.chirpstack_downlink_topic_template.format(self.gateway_mac)
         await self.chirpstack_mqtt_client.subscribe(chirpstack_downlink_topic)
         async with self.chirpstack_mqtt_client.listen(chirpstack_downlink_topic) as downlink_queue:
             while not stop_event.is_set():
