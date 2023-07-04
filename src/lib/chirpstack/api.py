@@ -253,6 +253,15 @@ class ChirpStackAPI:
         async for application in self._get_paginated_data(req, client.List, batch_size):
             yield application
 
+    @suppress_rpc_error([grpc.StatusCode.NOT_FOUND, grpc.StatusCode.UNAUTHENTICATED])
+    async def get_application(self, app_id: int) -> api.Application:
+        client = api.ApplicationServiceStub(self._channel)
+
+        req = api.GetApplicationRequest()
+        req.id = app_id
+
+        return (await client.Get(req, metadata=self._auth_token)).application
+
     async def create_service_profile(self, **kwargs) -> str:
         client = api.ServiceProfileServiceStub(self._channel)
 

@@ -167,18 +167,48 @@ async def main(loop):
             return
 
         logger.warning("Starting in single-organization mode", handling_org=[chirpstack_org.name])
-        ran_chirpstack_devices = chirpstack.MultiApplicationDeviceList(
-            chirpstack_api=chirpstack_api,
-            tags=tags,
-            org_id=settings.CHIRPSTACK_ORGANIZATION_ID,
-            update_hook=ran_devices_sync_hook,
-        )
-        ran_chirpstack_multicast_groups = chirpstack.MultiApplicationMulticastGroupList(
-            chirpstack_api=chirpstack_api,
-            org_id=settings.CHIRPSTACK_ORGANIZATION_ID,
-            update_hook=ran_multicast_groups_sync_hook,
-        )
-        
+        if settings.CHIRPSTACK_APPLICATION_ID == 0:
+            logger.warning(
+                "CHIRPSTACK_APPLICATION_ID is set to 0. Starting in multi-application mode",
+                handling_applications=[app.name async for app in chirpstack_api.get_applications(organization_id=settings.CHIRPSTACK_ORGANIZATION_ID)],
+            )
+            ran_chirpstack_devices = chirpstack.MultiApplicationDeviceList(
+                chirpstack_api=chirpstack_api,
+                tags=tags,
+                org_id=settings.CHIRPSTACK_ORGANIZATION_ID,
+                update_hook=ran_devices_sync_hook,
+            )
+            ran_chirpstack_multicast_groups = chirpstack.MultiApplicationMulticastGroupList(
+                chirpstack_api=chirpstack_api,
+                org_id=settings.CHIRPSTACK_ORGANIZATION_ID,
+                update_hook=ran_multicast_groups_sync_hook,
+            )
+        else:
+            chirpstack_app = await chirpstack_api.get_application(app_id=settings.CHIRPSTACK_APPLICATION_ID)
+            if chirpstack_app is None:
+                logger.error(
+                    "ChirpStack application with this id not found."
+                    "Ensure you provide correct CHIRPSTACK_APPLICATION_ID.",
+                    app_id=settings.CHIRPSTACK_APPLICATION_ID
+                )
+                await ran_core.close()
+                return
+
+            logger.warning("Starting in single-application mode", handling_app=[chirpstack_app.name])
+            ran_chirpstack_devices = chirpstack.ApplicationDeviceList(
+                chirpstack_api=chirpstack_api,
+                tags=tags,
+                org_id=settings.CHIRPSTACK_ORGANIZATION_ID,
+                application_id=settings.CHIRPSTACK_APPLICATION_ID,
+                update_hook=ran_devices_sync_hook,
+            )
+            ran_chirpstack_multicast_groups = chirpstack.ApplicationMulticastGroupList(
+                chirpstack_api=chirpstack_api,
+                org_id=settings.CHIRPSTACK_ORGANIZATION_ID,
+                application_id=settings.CHIRPSTACK_APPLICATION_ID,
+                update_hook=ran_multicast_groups_sync_hook,
+            )
+
     logger.info("Cleanup RAN device list")
     await ran_core.routing_table.delete_all()
     logger.info("Cleanup done")
