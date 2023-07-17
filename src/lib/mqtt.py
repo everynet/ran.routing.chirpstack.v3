@@ -1,4 +1,5 @@
 import asyncio
+import ssl
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from typing import Any, AsyncGenerator, Optional, Tuple, Union
 from urllib.parse import unquote, urlparse
@@ -84,7 +85,7 @@ class MQTTClient:
         client_options["port"] = uri_parsed.port or self._get_mqtt_default_port(uri_parsed.scheme)
 
         if uri_parsed.scheme in ["wss", "mqtts", "ssl"]:
-            client_options["tls_context"] = True
+            client_options["tls_context"] = ssl.create_default_context()
 
         if uri_parsed.username is not None:
             password = uri_parsed.password if uri_parsed.password else ""
