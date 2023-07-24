@@ -184,7 +184,7 @@ async def main(loop):
                 update_hook=ran_multicast_groups_sync_hook,
             )
         else:
-            chirpstack_app = await chirpstack_api.get_application(app_id=settings.CHIRPSTACK_APPLICATION_ID)
+            chirpstack_app = await chirpstack_api.get_application(application_id=settings.CHIRPSTACK_APPLICATION_ID)
             if chirpstack_app is None:
                 logger.error(
                     "ChirpStack application with this id not found."
