@@ -170,16 +170,6 @@ class ChirpStackExtendedApi(ChirpStackAPI):
         response = await client.Create(req, metadata=self._auth_token)
         return response.id
 
-    @suppress_rpc_error([grpc.StatusCode.NOT_FOUND, grpc.StatusCode.UNAUTHENTICATED])
-    async def get_application(self, application_id: int):
-        client = api.ApplicationServiceStub(self._channel)
-
-        req = api.GetApplicationRequest()
-        req.id = application_id
-
-        res = await client.Get(req, metadata=self._auth_token)
-        return res.application
-
     async def delete_application(self, application_id: int):
         client = api.ApplicationServiceStub(self._channel)
 
