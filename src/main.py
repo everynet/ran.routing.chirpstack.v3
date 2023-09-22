@@ -10,9 +10,11 @@ import structlog
 import uvloop
 from grpc.aio._channel import Channel
 from ran.routing.core import Core as RANCore
+from ran.routing.core import RanApiEndpointSchema
 
 import settings
 from lib import chirpstack, healthcheck, mqtt
+from lib.device_sync import DeviceSync
 from lib.logging_conf import configure_logging
 from lib.ran_hooks import RanDevicesSyncHook, RanMulticastGroupsSyncHook
 from lib.traffic.chirpstack import ChirpstackTrafficRouter
@@ -70,6 +72,7 @@ async def main(loop):
 
     # Event to signal when service is ready
     service_ready = asyncio.Event()
+    service_ready.clear()
 
     async def healthcheck_live(context):
         if stop_event.is_set():
@@ -96,8 +99,34 @@ async def main(loop):
     for sig in STOP_SIGNALS:
         loop.add_signal_handler(sig, stop_all)
 
-    healthcheck_server = healthcheck.HealthcheckServer(healthcheck_live, healthcheck_ready, context=None)
     tasks = set()
+
+    async def wait_tasks_shutdown():
+        finished, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+        finished_task = finished.pop()
+        logger.warning(f"Task {finished_task.get_name()!r} exited, shutting down gracefully")
+
+        graceful_shutdown_max_time = 20  # seconds
+        for task in pending:
+            with suppress(asyncio.TimeoutError):
+                logger.debug(f"Waiting task {task.get_name()!r} to shutdown gracefully")
+                await asyncio.wait_for(task, graceful_shutdown_max_time / len(tasks))
+                logger.debug(f"Task {task.get_name()!r} exited")
+
+        # If tasks not exited gracefully, terminate them by cancelling
+        for task in pending:
+            if not task.done():
+                task.cancel()
+
+        for task in pending:
+            try:
+                await task
+            except asyncio.CancelledError:
+                logger.warning(f"Task {task.get_name()!r} terminated")
+
+    # HealthCheck must start ASAP, to make health probes accessible.
+    healthcheck_server = healthcheck.HealthcheckServer(healthcheck_live, healthcheck_ready, context=None)
     tasks.add(
         asyncio.create_task(
             healthcheck_server.run(stop_event, settings.HEALTHCHECK_SERVER_HOST, settings.HEALTHCHECK_SERVER_PORT),
@@ -118,11 +147,32 @@ async def main(loop):
 
     chirpstack_api = chirpstack.ChirpStackAPI(grpc_channel, settings.CHIRPSTACK_API_TOKEN)
 
-    logger.info("Using RAN API url: ", coverage=settings.RAN_API_URL)
-    ran_core = RANCore(access_token=settings.RAN_TOKEN, url=settings.RAN_API_URL)
-    await ran_core.connect()
+    if settings.RAN_API_URL is not None:
+        logger.info("Connecting to ran-routing", url=settings.RAN_API_URL)
+        ran_core = RANCore(access_token=settings.RAN_TOKEN, url=settings.RAN_API_URL)
 
-    logger.info("Performing initial ChirpStack devices list sync")
+    else:
+        required_urls = {
+            "routing": settings.RAN_API_ROUTING_URL,
+            "multicast": settings.RAN_API_MULTICAST_URL,
+            "upstream": settings.RAN_API_UPSTREAM_URL,
+            "downstream": settings.RAN_API_DOWNSTREAM_URL,
+        }
+        if any(url is None for url in required_urls.values()):
+            logger.error(
+                "No RAN_API urls provided. Please, specify 'RAN_API_URL' or all of "
+                "'RAN_API_ROUTING_URL', 'RAN_API_MULTICAST_URL', 'RAN_API_UPSTREAM_URL', 'RAN_API_DOWNSTREAM_URL'"
+            )
+            stop_event.set()
+            await wait_tasks_shutdown()
+            return
+        logger.info("Connecting to ran-routing", **required_urls)
+        ran_core = RANCore(
+            access_token=settings.RAN_TOKEN,
+            endpoint_schema=RanApiEndpointSchema(**required_urls),
+        )
+    await ran_core.connect()
+    logger.info("Connected to RAN API")
 
     ran_devices_sync_hook = RanDevicesSyncHook(ran_core=ran_core)
     ran_multicast_groups_sync_hook = RanMulticastGroupsSyncHook(ran_core=ran_core)
@@ -139,7 +189,9 @@ async def main(loop):
                 "CHIRPSTACK_ORGANIZATION_ID.\n",
                 flush=True,
             )
+            stop_event.set()
             await ran_core.close()
+            await wait_tasks_shutdown()
             return
 
         logger.warning(
@@ -161,8 +213,10 @@ async def main(loop):
             logger.error(
                 "ChirpStack organization with this id not found."
                 "Ensure you provide correct CHIRPSTACK_ORGANIZATION_ID.",
-                org_id=settings.CHIRPSTACK_ORGANIZATION_ID
+                org_id=settings.CHIRPSTACK_ORGANIZATION_ID,
             )
+            stop_event.set()
+            await wait_tasks_shutdown()
             await ran_core.close()
             return
 
@@ -170,7 +224,12 @@ async def main(loop):
         if settings.CHIRPSTACK_APPLICATION_ID == 0:
             logger.warning(
                 "CHIRPSTACK_APPLICATION_ID is set to 0. Starting in multi-application mode",
-                handling_applications=[app.name async for app in chirpstack_api.get_applications(organization_id=settings.CHIRPSTACK_ORGANIZATION_ID)],
+                handling_applications=[
+                    app.name
+                    async for app in chirpstack_api.get_applications(
+                        organization_id=settings.CHIRPSTACK_ORGANIZATION_ID
+                    )
+                ],
             )
             ran_chirpstack_devices = chirpstack.MultiApplicationDeviceList(
                 chirpstack_api=chirpstack_api,
@@ -189,8 +248,10 @@ async def main(loop):
                 logger.error(
                     "ChirpStack application with this id not found."
                     "Ensure you provide correct CHIRPSTACK_APPLICATION_ID.",
-                    app_id=settings.CHIRPSTACK_APPLICATION_ID
+                    app_id=settings.CHIRPSTACK_APPLICATION_ID,
                 )
+                stop_event.set()
+                await wait_tasks_shutdown()
                 await ran_core.close()
                 return
 
@@ -209,18 +270,21 @@ async def main(loop):
                 update_hook=ran_multicast_groups_sync_hook,
             )
 
-    logger.info("Cleanup RAN device list")
-    await ran_core.routing_table.delete_all()
-    logger.info("Cleanup done")
-
     logger.info("Cleanup RAN multicast groups")
     mcg = await ran_core.multicast_groups.get_multicast_groups()
     await ran_core.multicast_groups.delete_multicast_groups([group.addr for group in mcg])
-    logger.info("Cleanup done")
+    logger.info("Multicast groups removed (sync after devices)")
 
-    logger.info("Performing initial ChirpStack devices list sync")
-    await ran_chirpstack_devices.sync_from_remote()
-    logger.info("Devices synced")
+    logger.warning("Performing initial ChirpStack devices list sync")
+    try:
+        await DeviceSync(ran=ran_core, device_list=ran_chirpstack_devices).perform_full_sync()
+    except Exception:
+        logger.exception("Device sync failed, terminating bridge...")
+        stop_event.set()
+        await wait_tasks_shutdown()
+        await ran_core.close()
+        return
+    logger.warning("Devices sync completed")
 
     logger.info("Performing initial ChirpStack multicast groups list sync")
     await ran_chirpstack_multicast_groups.sync_from_remote()
@@ -271,34 +335,17 @@ async def main(loop):
     tasks.add(asyncio.create_task(manager.run(stop_event), name="traffic_manager"))
     logger.info("TrafficManager started", task_name="traffic_manager")
 
+    # Waiting for stop event
     tasks.add(asyncio.create_task(stop_event.wait(), name="stop_event_wait"))
 
     service_ready.set()
-    finished, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    # Here bridge will block forever and only os signal may stop it.
+    await wait_tasks_shutdown()
+    await ran_core.close()
     service_ready.clear()
 
-    finished_task = finished.pop()
-    logger.warning(f"Task {finished_task.get_name()!r} exited, shutting down gracefully")
-
-    graceful_shutdown_max_time = 20  # seconds
-    for task in pending:
-        with suppress(asyncio.TimeoutError):
-            logger.debug(f"Waiting task {task.get_name()!r} to shutdown gracefully")
-            await asyncio.wait_for(task, graceful_shutdown_max_time / len(tasks))
-            logger.debug(f"Task {task.get_name()!r} exited")
-
-    # If tasks not exited gracefully, terminate them by cancelling
-    for task in pending:
-        if not task.done():
-            task.cancel()
-
-    for task in pending:
-        try:
-            await task
-        except asyncio.CancelledError:
-            logger.warning(f"Task {task.get_name()!r} terminated")
-
     logger.info("Bye!")
+    return
 
 
 if __name__ == "__main__":

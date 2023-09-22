@@ -7,7 +7,7 @@ from typing import Any, AsyncIterator, Dict, Optional, Protocol
 from .api import ChirpStackAPI
 
 
-@dataclass()
+@dataclass(slots=True)
 class Device:
     _devices: DeviceList
 
@@ -97,7 +97,7 @@ class DeviceList(Protocol):
 
     # This method must sync devices with remote
     @abstractmethod
-    async def sync_from_remote(self):
+    async def sync_from_remote(self, trigger_update_hook: bool = True) -> None:
         pass
 
     # Internal methods, required for "Device" interaction
@@ -179,7 +179,7 @@ class ApplicationDeviceList(BaseChirpstackDeviceList):
             if device.device_profile_id in device_profile_ids:
                 yield device
 
-    async def sync_from_remote(self) -> None:
+    async def sync_from_remote(self, trigger_update_hook: bool = True) -> None:
         dev_eui_to_device: Dict[str, Device] = {}
         dev_addr_to_dev_eui: Dict[str, str] = {}
 
@@ -196,15 +196,17 @@ class ApplicationDeviceList(BaseChirpstackDeviceList):
 
             existed_device = self._dev_eui_to_device.get(dev_eui)
             if not existed_device:
-                await self.update_hook.on_device_add(device)
+                if trigger_update_hook:
+                    await self.update_hook.on_device_add(device)
                 continue
 
-            if existed_device != device:
+            if trigger_update_hook and existed_device != device:
                 await self.update_hook.on_device_updated(existed_device, device)
 
-        for dev_eui, device in self._dev_eui_to_device.items():
-            if dev_eui not in dev_eui_to_device:
-                await self.update_hook.on_device_remove(device)
+        if trigger_update_hook:
+            for dev_eui, device in self._dev_eui_to_device.items():
+                if dev_eui not in dev_eui_to_device:
+                    await self.update_hook.on_device_remove(device)
 
         self._dev_eui_to_device = dev_eui_to_device
         self._dev_addr_to_dev_eui = dev_addr_to_dev_eui
@@ -235,70 +237,6 @@ class ApplicationDeviceList(BaseChirpstackDeviceList):
         return self._dev_eui_to_device.get(self._dev_addr_to_dev_eui.get(dev_addr, None), None)  # type: ignore
 
 
-# class MultiApplicationDeviceList(BaseChirpstackDeviceList):
-#     def __init__(
-#         self,
-#         chirpstack_api: ChirpStackAPI,
-#         tags: Optional[Dict[str, str]] = None,
-#         org_id: int = 0,
-#         update_hook: None | BaseUpdateHook = None,
-#     ) -> None:
-#         super().__init__(chirpstack_api, update_hook=update_hook)
-#         self._applications: Dict[int, ApplicationDeviceList] = {}
-#         self._tags = tags if tags is not None else {}
-#         self._org_id = org_id
-
-#     async def sync_from_remote(self) -> None:
-#         application_ids = set()
-
-#         async for application in self._api.get_applications(organization_id=self._org_id):
-#             if application.id not in self._applications:
-#                 app_dev_list = ApplicationDeviceList(
-#                     chirpstack_api=self._api,
-#                     application_id=application.id,
-#                     org_id=self._org_id,
-#                     tags=self._tags,
-#                     update_hook=self.update_hook,
-#                 )
-#                 self._applications[application.id] = app_dev_list
-
-#             application_ids.add(application.id)
-#             await self._applications[application.id].sync_from_remote()
-
-#         # Removing applications lists, which was deleted
-#         for application_id in list(self._applications.keys()):
-#             if application_id not in application_ids:
-#                 del self._applications[application_id]
-
-#     def get_device_by_dev_eui(self, dev_eui: str) -> Optional[Device]:
-#         for app_list in self._applications.values():
-#             device = app_list.get_device_by_dev_eui(dev_eui)
-#             if device:
-#                 return device
-#         return None
-
-#     def get_device_by_dev_addr(self, dev_addr: str) -> Optional[Device]:
-#         for app_list in self._applications.values():
-#             device = app_list.get_device_by_dev_addr(dev_addr)
-#             if device:
-#                 return device
-#         return None
-
-#     def _update_local_device(self, device) -> None:
-#         for app_list in self._applications.values():
-#             app_device = app_list.get_device_by_dev_eui(device.dev_eui)
-#             if app_device:
-#                 app_list._update_local_device(device)
-#                 break
-#         return None
-
-#     def get_all_devices(self):
-#         all_devices = []
-#         for app_list in self._applications.values():
-#             all_devices.extend(app_list.get_all_devices())
-#         return all_devices
-
-
 class _BaseMultiListDeviceList(BaseChirpstackDeviceList):
     _children: dict[Any, BaseChirpstackDeviceList]  # Must be defined in inheritor
 
@@ -324,7 +262,7 @@ class _BaseMultiListDeviceList(BaseChirpstackDeviceList):
                 break
         return None
 
-    def get_all_devices(self):
+    def get_all_devices(self) -> list[Device]:
         all_devices = []
         for children_list in self._children.values():
             all_devices.extend(children_list.get_all_devices())
@@ -344,7 +282,7 @@ class MultiApplicationDeviceList(_BaseMultiListDeviceList):
         self._tags = tags if tags is not None else {}
         self._org_id = org_id
 
-    async def sync_from_remote(self) -> None:
+    async def sync_from_remote(self, trigger_update_hook: bool = True) -> None:
         application_ids = set()
 
         async for application in self._api.get_applications(organization_id=self._org_id):
@@ -359,7 +297,7 @@ class MultiApplicationDeviceList(_BaseMultiListDeviceList):
                 self._children[application.id] = app_dev_list
 
             application_ids.add(application.id)
-            await self._children[application.id].sync_from_remote()
+            await self._children[application.id].sync_from_remote(trigger_update_hook=trigger_update_hook)
 
         # Removing applications lists, which was deleted
         for application_id in list(self._children.keys()):
@@ -378,7 +316,7 @@ class MultiOrgDeviceList(_BaseMultiListDeviceList):
         self._children: Dict[str, MultiApplicationDeviceList] = {}  # type: ignore
         self._tags = tags if tags is not None else {}
 
-    async def sync_from_remote(self) -> None:
+    async def sync_from_remote(self, trigger_update_hook: bool = True) -> None:
         org_ids = set()
 
         async for org in self._api.get_organizations():
@@ -392,7 +330,7 @@ class MultiOrgDeviceList(_BaseMultiListDeviceList):
                 self._children[org.id] = multi_app_dev_list
 
             org_ids.add(org.id)
-            await self._children[org.id].sync_from_remote()
+            await self._children[org.id].sync_from_remote(trigger_update_hook=trigger_update_hook)
 
         # Removing applications lists, which was deleted
         for org_id in list(self._children.keys()):
