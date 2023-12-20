@@ -406,7 +406,7 @@ async def test_device_exists_only_in_ran(device_sync):
     # Setup
     ran_device = MagicMock()
     ran_device.dev_eui = int("f" * 16, 16)
-    ran_device.dev_addr = int("a" * 8, 16)
+    ran_device.active_dev_addr = int("a" * 8, 16)
     device_sync._fetch_chirpstack_devices = AsyncMock(return_value=[])
     device_sync._fetch_ran_devices = AsyncMock(return_value=[ran_device])
 

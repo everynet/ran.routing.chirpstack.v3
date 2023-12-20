@@ -272,23 +272,26 @@ async def main(loop):
 
     logger.info("Cleanup RAN multicast groups")
     mcg = await ran_core.multicast_groups.get_multicast_groups()
-    await ran_core.multicast_groups.delete_multicast_groups([group.addr for group in mcg])
-    logger.info("Multicast groups removed (sync after devices)")
+    if len(mcg):
+        await ran_core.multicast_groups.delete_multicast_groups([group.addr for group in mcg])
+        logger.info("Multicast groups removed (sync after devices)")
+    else:
+        logger.info("No multicast group on RAN, skipping clean")
 
     logger.warning("Performing initial ChirpStack devices list sync")
     try:
-        await DeviceSync(ran=ran_core, device_list=ran_chirpstack_devices).perform_full_sync()
+        await DeviceSync(
+            ran=ran_core,
+            device_list=ran_chirpstack_devices,
+            skip_ran_orphaned_devices=settings.SKIP_RAN_ORPHANED_DEVICES,
+        ).perform_full_sync()
     except Exception:
         logger.exception("Device sync failed, terminating bridge...")
         stop_event.set()
-        await wait_tasks_shutdown()
         await ran_core.close()
+        await wait_tasks_shutdown()
         return
     logger.warning("Devices sync completed")
-
-    logger.info("Performing initial ChirpStack multicast groups list sync")
-    await ran_chirpstack_multicast_groups.sync_from_remote()
-    logger.info("Multicast groups synced")
 
     tasks.add(
         Periodic(ran_chirpstack_devices.sync_from_remote).create_task(
@@ -308,9 +311,21 @@ async def main(loop):
     )
     logger.info("Periodic multicast groups list sync scheduled", task_name="update_chirpstack_multicast_groups_list")
 
+    logger.info("Connecting to MQTT")
     chirpstack_mqtt_client = mqtt.MQTTClient(settings.CHIRPSTACK_MQTT_SERVER_URI, client_id=uuid.uuid4().hex)
     tasks.add(asyncio.create_task(chirpstack_mqtt_client.run(stop_event), name="chirpstack_mqtt_client"))
     logger.info("MQTT client task started", task_name="chirpstack_mqtt_client")
+    try:
+        await chirpstack_mqtt_client.wait_for_connection(timeout=10.)
+    except Exception as e:
+        # If failed to initially connect MQTT - just terminate application, because this error may cause unpredicted
+        # behavior during startup procedure.
+        logger.error("Failed to connect to MQTT, application will be terminated", error=e)
+        stop_event.set()
+        await ran_core.close()
+        await wait_tasks_shutdown()
+        return
+    logger.info("MQTT Client ready")
 
     gateway = await get_gateway(chirpstack_api, settings.CHIRPSTACK_GATEWAY_ID)
     logger.info("Using gateway mac", mac=gateway.id)

@@ -1,8 +1,10 @@
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 import structlog
 from ran.routing.core import Core as RANCore
 from ran.routing.core.domains import Device as RanDevice
+from ran.routing.core.routing_table.exceptions import ApiDeviceAlreadyExistsError, ApiError, RoutingTableError
 
 from lib.chirpstack import Device as ChirpstackDevice
 from lib.chirpstack import DeviceList
@@ -21,6 +23,7 @@ class Counters:
     deactivation: int = field(default=0)
     update: int = field(default=0)
     noop: int = field(default=0)
+    error: int = field(default=0)
 
     def reset(self):
         self.activation = 0
@@ -28,6 +31,7 @@ class Counters:
         self.deactivation = 0
         self.update = 0
         self.noop = 0
+        self.error = 0
 
     def as_dict(self):
         return {
@@ -36,6 +40,7 @@ class Counters:
             "deactivation": self.deactivation,
             "update": self.update,
             "noop": self.noop,
+            "error": self.error,
         }
 
 
@@ -55,10 +60,43 @@ class Counters:
 #     - Delete device from ChirpStack with "RoutingTable.delete" (TODO: ensure this is correct behavior)
 # * Reactivation is sequential call of "RoutingTable.delete" and "RoutingTable.insert"
 class DeviceSync:
-    def __init__(self, ran: RANCore, device_list: DeviceList) -> None:
+    def __init__(self, ran: RANCore, device_list: DeviceList, skip_ran_orphaned_devices: bool = False) -> None:
         self.ran = ran
         self.device_list = device_list
+        self.skip_ran_orphaned_devices = skip_ran_orphaned_devices
         self.cnt = Counters()
+
+    @asynccontextmanager
+    async def handle_error(self, ran_device: RanDevice | None = None, cs_device: ChirpstackDevice | None = None):
+        if ran_device:
+            dev_eui = f"{ran_device.dev_eui:016x}"
+            dev_addr = f"{ran_device.active_dev_addr:08x}" if ran_device.active_dev_addr else None
+        elif cs_device:
+            dev_eui = cs_device.dev_eui
+            dev_addr = cs_device.dev_addr
+        else:
+            raise ValueError("Either ran_device or cs_device must be provided!")
+
+        log = logger.bind(dev_eui=dev_eui, dev_addr=dev_addr)
+
+        try:
+            yield
+        except ApiDeviceAlreadyExistsError:
+            self.cnt.error += 1
+            log.exception("Failed to sync device (device already exist)")
+        except ApiError as ex:
+            self.cnt.error += 1
+            log.exception(
+                "Failed to sync device (api error)",
+                code=ex.error_code,
+                description=ex.error_description,
+            )
+        except RoutingTableError:
+            self.cnt.error += 1
+            log.exception("Failed to sync device (RoutingTable error)")
+        except Exception:
+            self.cnt.error += 1
+            log.exception("Failed to sync device (unhandled error)")
 
     async def _fetch_chirpstack_devices(self) -> list[ChirpstackDevice]:
         logger.info("Fetching devices from ChirpStack...")
@@ -162,12 +200,20 @@ class DeviceSync:
         logger.info("[Activation] Device added to RAN", dev_eui=cs_device.dev_eui, dev_addr=cs_device.dev_addr)
 
     async def _handle_only_in_ran(self, ran_device: RanDevice) -> None:
+        if self.skip_ran_orphaned_devices:
+            logger.info(
+                "[Noop] Orphaned device found in RAN, but not deactivated due 'SKIP_RAN_ORPHANED_DEVICES' flag set",
+                dev_eui=hex(ran_device.dev_eui).lstrip("0x"),
+                dev_addr=hex(ran_device.active_dev_addr).lstrip("0x") if ran_device.active_dev_addr else None,
+            )
+            return
+
         await self.ran.routing_table.delete([ran_device.dev_eui])
         self.cnt.deactivation += 1
         logger.info(
             "[Deactivation] Device deleted from RAN",
             dev_eui=hex(ran_device.dev_eui).lstrip("0x"),
-            dev_addr=ran_device.active_dev_addr,
+            dev_addr=hex(ran_device.active_dev_addr).lstrip("0x") if ran_device.active_dev_addr else None,
         )
 
     async def perform_full_sync(self):
@@ -182,18 +228,18 @@ class DeviceSync:
 
         # Devices in both ChirpStack and RAN
         for common_dev_eui in cs_dev_euis.intersection(ran_dev_euis):
-            # logger.debug("Device exist in both RAN and ChirpStack, performing sync", dev_eui=common_dev_eui)
-            await self._handle_both_exist(cs_devices_map[common_dev_eui], ran_devices_map[common_dev_eui])
+            async with self.handle_error(cs_device=cs_devices_map[common_dev_eui]):
+                await self._handle_both_exist(cs_devices_map[common_dev_eui], ran_devices_map[common_dev_eui])
 
         # Devices only in ChirpStack
         for only_cs_dev_eui in cs_dev_euis - ran_dev_euis:
-            # logger.debug("ChirpStack device not found in RAN, adding device", dev_eui=only_cs_dev_eui)
-            await self._handle_only_in_chirpstack(cs_devices_map[only_cs_dev_eui])
+            async with self.handle_error(cs_device=cs_devices_map[only_cs_dev_eui]):
+                await self._handle_only_in_chirpstack(cs_devices_map[only_cs_dev_eui])
 
         # Devices only in RAN
         for only_ran_dev_eui in ran_dev_euis - cs_dev_euis:
-            # logger.debug("Device in RAN is not exist in ChirpStack, removing device", dev_eui=only_ran_dev_eui)
-            await self._handle_only_in_ran(ran_devices_map[only_ran_dev_eui])
+            async with self.handle_error(ran_device=ran_devices_map[only_ran_dev_eui]):
+                await self._handle_only_in_ran(ran_devices_map[only_ran_dev_eui])
 
         logger.warning("Devices synced, summary: ", **self.cnt.as_dict())
         self.cnt.reset()

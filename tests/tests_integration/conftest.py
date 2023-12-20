@@ -113,6 +113,7 @@ async def mqtt_client() -> MQTTClient:
     stop.clear()
 
     client_task = asyncio.create_task(mqtt_client.run(stop))
+    await mqtt_client.wait_for_connection()
 
     yield mqtt_client
 

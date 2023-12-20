@@ -26,7 +26,7 @@ With this software, you can connect your [ChirpStack Application]([https://www.c
 
 Before we start it is important to mention that Everynet RAN main functionality is LoRaWAN traffic routing, while ChirpStack is doing the rest of the job: device and key management, payload parsing and so on...
 
-**Everynet RAN does not store any device-related cryptographic keys and is not capable of decrypting customer traffic.** 
+**Everynet RAN does not store any device-related cryptographic keys and is not capable of decrypting customer traffic.**
 
 ## How it works
 
@@ -55,7 +55,7 @@ Template with all config variables with their default can be found at [`.env-dis
 
 
 | Parameter                              | Required | Default value           | Description                                                                                                                                                                           |
-|----------------------------------------|----------|-------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| -------------------------------------- | -------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | CHIRPSTACK_API_TOKEN                   | Yes      |                         | You can generate an API Token using the corresponding menu item in the Сhirpstack Application Server Web UI                                                                           |
 | CHIRPSTACK_API_GRPC_HOST               | Yes      |                         | ChirpStack host name (IP address can also be used). This address is used by the ran-chirpstack-bridge to make gRPC calls to the ChirpStack Application. e.g. my-chirpstack-server.com |
 | CHIRPSTACK_API_GRPC_PORT               |          | 433                     | ChirpStack gRPC API port                                                                                                                                                              |
@@ -76,6 +76,7 @@ Template with all config variables with their default can be found at [`.env-dis
 | HEALTHCHECK_SERVER_PORT                |          | 9090                    | Internal healtcheck http server port http://[host]:[port]/health/live http://[host]:[port]/health/ready                                                                               |
 | LOG_LEVEL                              |          | info                    | Logging level. Allowed values: info, warning, error, debug                                                                                                                            |
 | LOG_COLORS                             |          | True                    | Enable/disable ascii color-codes for textual log output.                                                                                                                              |
+| SKIP_RAN_ORPHANED_DEVICES              |          | False                   | By default, the bridge removes devices in Ran-Routing that are not listed in the ChirpStack database. Set this flag to true to keep these devices instead of removing them.           |
 
 ---
 
