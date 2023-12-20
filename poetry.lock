@@ -1377,13 +1377,14 @@ develop = false
 
 [package.dependencies]
 aiohttp = "^3.8.1"
+async-timeout = "^4.0.3"
 pydantic = "^1.9.1"
 
 [package.source]
 type = "git"
 url = "https://github.com/everynet/ran.routing.pyclient.git"
 reference = "main"
-resolved_reference = "4dbaa2f790dece7b1780318d5a7c78a98092e7ad"
+resolved_reference = "b0250e1972171b4d63ac842bf4b6a05b4242bd0a"
 
 [[package]]
 name = "requests"
