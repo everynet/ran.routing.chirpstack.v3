@@ -162,29 +162,29 @@ class DeviceSync:
                 dev_addr=cs_device.dev_addr,
             )
             return
+
+        if ran_device.join_eui:
+            await self.ran.routing_table.update(
+                dev_eui=ran_device.dev_eui,
+                join_eui=ran_device.join_eui,
+                active_dev_addr=cs_dev_addr,
+                target_dev_addr=None,
+            )
+            self.cnt.update += 1
+            logger.info(
+                "[Update] Device updated",
+                dev_eui=cs_device.dev_eui,
+                dev_addr=cs_device.dev_addr,
+            )
         else:
-            if ran_device.join_eui:
-                await self.ran.routing_table.update(
-                    dev_eui=ran_device.dev_eui,
-                    join_eui=ran_device.join_eui,
-                    active_dev_addr=cs_dev_addr,
-                    target_dev_addr=None,
-                )
-                self.cnt.update += 1
-                logger.info(
-                    "[Update] Device updated",
-                    dev_eui=cs_device.dev_eui,
-                    dev_addr=cs_device.dev_addr,
-                )
-            else:
-                await self.ran.routing_table.delete([ran_device.dev_eui])
-                await self.ran.routing_table.insert(dev_eui=int(cs_device.dev_eui, 16), dev_addr=cs_dev_addr)
-                self.cnt.reactivation += 1
-                logger.info(
-                    "[Reactivation] Device reactivated",
-                    dev_eui=cs_device.dev_eui,
-                    dev_addr=cs_device.dev_addr,
-                )
+            await self.ran.routing_table.delete([ran_device.dev_eui])
+            await self.ran.routing_table.insert(dev_eui=int(cs_device.dev_eui, 16), dev_addr=cs_dev_addr)
+            self.cnt.reactivation += 1
+            logger.info(
+                "[Reactivation] Device reactivated",
+                dev_eui=cs_device.dev_eui,
+                dev_addr=cs_device.dev_addr,
+            )
 
     async def _handle_only_in_chirpstack(self, cs_device: ChirpstackDevice) -> None:
         # TODO: ChirpStack does not provide real join_eui in simple way, so we using devices "dev_eui" as "join_eui".
@@ -203,8 +203,8 @@ class DeviceSync:
         if self.skip_ran_orphaned_devices:
             logger.info(
                 "[Noop] Orphaned device found in RAN, but not deactivated due 'SKIP_RAN_ORPHANED_DEVICES' flag set",
-                dev_eui=hex(ran_device.dev_eui).lstrip("0x"),
-                dev_addr=hex(ran_device.active_dev_addr).lstrip("0x") if ran_device.active_dev_addr else None,
+                dev_eui=f"{ran_device.dev_eui:016x}",
+                dev_addr=f"{ran_device.dev_eui:08x}" if ran_device.active_dev_addr else None,
             )
             return
 
@@ -212,8 +212,8 @@ class DeviceSync:
         self.cnt.deactivation += 1
         logger.info(
             "[Deactivation] Device deleted from RAN",
-            dev_eui=hex(ran_device.dev_eui).lstrip("0x"),
-            dev_addr=hex(ran_device.active_dev_addr).lstrip("0x") if ran_device.active_dev_addr else None,
+            dev_eui=f"{ran_device.dev_eui:016x}",
+            dev_addr=f"{ran_device.dev_eui:08x}" if ran_device.active_dev_addr else None,
         )
 
     async def perform_full_sync(self):
@@ -221,23 +221,26 @@ class DeviceSync:
         ran_devices = await self._fetch_ran_devices()
 
         cs_devices_map: dict[str, ChirpstackDevice] = {dev.dev_eui: dev for dev in cs_devices}
-        ran_devices_map: dict[str, RanDevice] = {hex(dev.dev_eui).lstrip("0x"): dev for dev in ran_devices}
+        ran_devices_map: dict[str, RanDevice] = {f"{dev.dev_eui:016x}": dev for dev in ran_devices}
 
         cs_dev_euis: set[str] = set(cs_devices_map.keys())
         ran_dev_euis: set[str] = set(ran_devices_map.keys())
 
         # Devices in both ChirpStack and RAN
         for common_dev_eui in cs_dev_euis.intersection(ran_dev_euis):
+            logger.debug("Device exist in both RAN and ChirpStack, performing sync", dev_eui=common_dev_eui)
             async with self.handle_error(cs_device=cs_devices_map[common_dev_eui]):
                 await self._handle_both_exist(cs_devices_map[common_dev_eui], ran_devices_map[common_dev_eui])
 
         # Devices only in ChirpStack
         for only_cs_dev_eui in cs_dev_euis - ran_dev_euis:
+            logger.debug("ChirpStack device not found in RAN, adding device", dev_eui=only_cs_dev_eui)
             async with self.handle_error(cs_device=cs_devices_map[only_cs_dev_eui]):
                 await self._handle_only_in_chirpstack(cs_devices_map[only_cs_dev_eui])
 
         # Devices only in RAN
         for only_ran_dev_eui in ran_dev_euis - cs_dev_euis:
+            logger.debug("Device in RAN is not exist in ChirpStack, removing device", dev_eui=only_ran_dev_eui)
             async with self.handle_error(ran_device=ran_devices_map[only_ran_dev_eui]):
                 await self._handle_only_in_ran(ran_devices_map[only_ran_dev_eui])
 
